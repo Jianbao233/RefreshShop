@@ -1,0 +1,11 @@
+{
+  "id": "RefreshShop",
+  "pck_name": "RefreshShop",
+  "version": "0.1.0",
+  "name": "商店刷新 / Refresh Shop",
+  "author": "bili@我叫煎包",
+  "description": "为商店增加免费无限刷新入口，只刷新本地玩家自己的商店卡牌与遗物选项。刷新入口复用商店删卡服务的金币图标，不消耗金币。\nAdds a free unlimited refresh action for the local player's merchant cards and relics. The refresh entry reuses the merchant card removal gold icon and spends no gold.",
+  "has_pck": false,
+  "has_dll": true,
+  "affects_gameplay": false
+}
