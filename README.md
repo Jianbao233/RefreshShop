@@ -2,31 +2,29 @@
 
 《杀戮尖塔 2》商店刷新 Mod。
 
-## 目标
+## 功能
 
-在商店界面增加一个免费刷新入口，用于刷新本地玩家自己的商店卡牌与遗物选项。
+在商店删卡服务右下角增加一个半尺寸免费刷新按钮。点击后**重建本地玩家整个商店**，刷新所有卡牌、遗物、药水和删卡服务。
 
-- 刷新次数无限。
-- 刷新不消耗金币。
-- 刷新入口复用游戏商店中“删除卡牌服务”的金币图标/价格视觉区域。
-- 联机时只影响安装者自己的商店库存，不修改其他玩家商店。
-- 不处理先古之民事件选项。
+- 刷新次数无限，不消耗金币
+- 刷新入口复用商店删卡服务的金币图标视觉，显示价格 0
+- 联机时只影响安装者自己的商店库存，不发送网络消息，不修改其他玩家商店
+- 遗物池通过游戏自带 `RefreshRarity` 自动补充，不会耗尽
 
-## 当前状态
+## 安装
 
-当前仓库已完成项目骨架和设计文档，后续按 `docs/DESIGN.md` 实现补丁逻辑。
+1. 下载 `RefreshShop_v*.zip`
+2. 解压到 `Slay the Spire 2\mods\RefreshShop\`
+3. 文件夹内应有 `RefreshShop.dll` 和 `mod_manifest.json`
 
 ## 构建
 
 ```powershell
-cd "K:\杀戮尖塔mod制作\STS2_mod\RefreshShop"
+cd RefreshShop
 .\build.ps1
 ```
 
-构建脚本会复制到：
-
-- `K:\SteamLibrary\steamapps\common\Slay the Spire 2\mods\RefreshShop`
-- 如果 Steam 目录不存在，则使用 `%APPDATA%\SlayTheSpire2\mods\RefreshShop`
+构建脚本自动复制到游戏 mods 目录和 `torelease\`。
 
 ## 开源协议
 
