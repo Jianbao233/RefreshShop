@@ -17,6 +17,7 @@ public static class RefreshShopMod
     {
         if (_initialized) return;
         _initialized = true;
+        RefreshShopConfig.Initialize();
         GD.Print("[RefreshShop] Loaded. Merchant refresh design scaffold is active.");
     }
 

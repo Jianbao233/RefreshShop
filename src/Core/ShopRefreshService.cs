@@ -34,7 +34,7 @@ internal static class ShopRefreshService
     /// 用 CreateForNormalMerchant 重建当前玩家的商店，并刷新 UI。
     /// inventoryNode 是 NMerchantInventory Control 实例。
     /// </summary>
-    public static bool RebuildShop(object inventoryNode)
+    public static bool RebuildShop(object inventoryNode, bool refillsPurchased = true)
     {
         if (inventoryNode == null) return false;
 
@@ -60,6 +60,14 @@ internal static class ShopRefreshService
 
             var newInventory = createMethod.Invoke(null, new[] { player });
             if (newInventory == null) return false;
+
+            // 2b. 不补货模式：对旧 inventory 中 IsStocked==false 的位置，
+            //     在新 inventory 对应 entry 上调 ClearAfterPurchase（protected abstract，反射）
+            //     使其 IsStocked 变 false。后续 Initialize 的 FillSlot 会自然显示空槽。
+            if (!refillsPurchased)
+            {
+                PreserveEmptySlots(oldInventory, newInventory);
+            }
 
             // 3. 替换 MerchantRoom.Inventory（room 层；UI 层在第 6 步替换）
             var nMerchantRoomType = FindType("MegaCrit.Sts2.Core.Nodes.Rooms.NMerchantRoom");
@@ -116,6 +124,12 @@ internal static class ShopRefreshService
                 BindingFlags.NonPublic | BindingFlags.Instance);
             navMethod?.Invoke(inventoryNode, null);
 
+            // 8. 强制恢复 hidden slot 的可见性
+            // NMerchantRelic.UpdateVisual 在购买后设 Visible=false，Initialize 的 FillSlot
+            // 虽然更新了 _relicEntry，但 _relicNode 延迟释放导致 UpdateVisual 可能没重建节点。
+            // 这里遍历所有 slot，对 !Visible 的强制恢复并重新调 UpdateVisual。
+            ForceRestoreSlotVisibility(inventoryNode, newInventory);
+
             RefreshShopLog.Info("Shop rebuilt via CreateForNormalMerchant.");
             return true;
         }
@@ -123,6 +137,119 @@ internal static class ShopRefreshService
         {
             RefreshShopLog.Error($"RebuildShop failed: {ex.Message}");
             return false;
+        }
+    }
+
+    /// <summary>
+    /// 遍历所有 slot，对 Visible=false 的强制恢复可见性 + 重新调 UpdateVisual。
+    /// NMerchantRelic/NMerchantCard/NMerchantPotion 在购买后设 Visible=false，
+    /// Initialize 的 FillSlot 虽然更新了 entry，但 _relicNode 等延迟释放导致
+    /// UpdateVisual 可能没重建视觉节点。这里强制走一遍 UpdateVisual 确保恢复。
+    /// </summary>
+    private static void ForceRestoreSlotVisibility(object inventoryNode, object newInventory)
+    {
+        try
+        {
+            var invType = inventoryNode.GetType();
+            var getAllSlots = invType.GetMethod("GetAllSlots", BindingFlags.Public | BindingFlags.Instance);
+            if (getAllSlots == null) return;
+
+            var slots = getAllSlots.Invoke(inventoryNode, null) as IEnumerable;
+            if (slots == null) return;
+
+            int restored = 0;
+            foreach (var slotObj in slots)
+            {
+                if (slotObj is not Control slot) continue;
+
+                // 检查 slot 上的 Entry 是否 IsStocked
+                var entryProp = slot.GetType().GetProperty("Entry");
+                var entry = entryProp?.GetValue(slot);
+                if (entry == null) continue;
+
+                var isStockedProp = entry.GetType().GetProperty("IsStocked");
+                if (isStockedProp == null) continue;
+                var stockedVal = isStockedProp.GetValue(entry);
+                if (stockedVal is bool isStocked && !isStocked) continue; // 确实没货，不恢复
+
+                // 有货但 Visible=false → 强制恢复
+                if (!slot.Visible)
+                {
+                    slot.Visible = true;
+                    slot.MouseFilter = Control.MouseFilterEnum.Stop;
+                    restored++;
+                }
+
+                // 重新调 UpdateVisual（非 public virtual）
+                var updateVisual = slot.GetType().GetMethod("UpdateVisual",
+                    BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Public);
+                updateVisual?.Invoke(slot, null);
+            }
+
+            if (restored > 0)
+                RefreshShopLog.Info($"Force restored {restored} hidden slot(s) to visible.");
+        }
+        catch (Exception ex)
+        {
+            RefreshShopLog.Warn($"ForceRestoreSlotVisibility failed (non-fatal): {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 不补货模式：遍历旧 inventory 的 AllEntries，对 IsStocked==false 的位置，
+    /// 在新 inventory 对应位置 entry 上调 ClearAfterPurchase（protected abstract，反射）
+    /// 使其 IsStocked 变 false。后续 Initialize → FillSlot 会自然显示空槽。
+    ///
+    /// AllEntries 顺序：CharacterCardEntries + ColorlessCardEntries + RelicEntries + PotionEntries + CardRemovalEntry。
+    /// 新旧 inventory 结构相同（同 CreateForNormalMerchant），按索引对应。
+    /// </summary>
+    private static void PreserveEmptySlots(object oldInventory, object newInventory)
+    {
+        try
+        {
+            var oldInvType = oldInventory.GetType();
+            var newInvType = newInventory.GetType();
+
+            var allEntriesProp = oldInvType.GetProperty("AllEntries");
+            if (allEntriesProp == null) return;
+            var oldEntries = allEntriesProp.GetValue(oldInventory) as IEnumerable;
+            if (oldEntries == null) return;
+
+            var newEntries = newInvType.GetProperty("AllEntries")?.GetValue(newInventory) as IEnumerable;
+            if (newEntries == null) return;
+
+            var oldList = new System.Collections.Generic.List<object>();
+            foreach (var e in oldEntries) oldList.Add(e);
+            var newList = new System.Collections.Generic.List<object>();
+            foreach (var e in newEntries) newList.Add(e);
+
+            int cleared = 0;
+            int count = System.Math.Min(oldList.Count, newList.Count);
+            for (int i = 0; i < count; i++)
+            {
+                var oldEntry = oldList[i];
+                if (oldEntry == null) continue;
+
+                var isStockedProp = oldEntry.GetType().GetProperty("IsStocked");
+                if (isStockedProp == null) continue;
+                var stocked = isStockedProp.GetValue(oldEntry);
+                if (stocked is bool b && b) continue; // 仍有货，不用处理
+
+                // 旧槽已空 → 对新 entry 调 ClearAfterPurchase
+                var newEntry = newList[i];
+                if (newEntry == null) continue;
+                var clearMethod = newEntry.GetType().GetMethod(
+                    "ClearAfterPurchase",
+                    BindingFlags.NonPublic | BindingFlags.Instance);
+                clearMethod?.Invoke(newEntry, null);
+                cleared++;
+            }
+            if (cleared > 0)
+                RefreshShopLog.Info($"Preserved {cleared} empty slot(s) (no refill).");
+        }
+        catch (Exception ex)
+        {
+            RefreshShopLog.Warn($"PreserveEmptySlots failed (non-fatal): {ex.Message}");
         }
     }
 
@@ -203,23 +330,29 @@ internal static class ShopRefreshService
             if (!(getAllSlots.Invoke(invNode, null) is IEnumerable slots)) return;
 
             int count = 0;
+            // 需要断开的信号列表：focus_entered + NMerchantSlot 的 Hovered/Unhovered
+            // NMerchantSlot.Initialize 里会重新 Connect Hovered/Unhovered，不断开会报 already connected
+            var signalNames = new[] { "focus_entered", "Hovered", "Unhovered" };
             foreach (var slotObj in slots)
             {
                 if (slotObj is not Node slotNode) continue;
-                try
+                foreach (var sigName in signalNames)
                 {
-                    foreach (var dict in slotNode.GetSignalConnectionList("focus_entered"))
+                    try
                     {
-                        if (dict.TryGetValue("callable", out var c) && c.Obj is Callable callable)
+                        foreach (var dict in slotNode.GetSignalConnectionList(sigName))
                         {
-                            slotNode.Disconnect("focus_entered", callable);
-                            count++;
+                            if (dict.TryGetValue("callable", out var c) && c.Obj is Callable callable)
+                            {
+                                slotNode.Disconnect(sigName, callable);
+                                count++;
+                            }
                         }
                     }
+                    catch { /* 单信号断开失败不影响其他 */ }
                 }
-                catch { /* 单 slot 断开失败不影响其他 */ }
             }
-            RefreshShopLog.Info($"Disconnected {count} stale focus_entered handlers.");
+            RefreshShopLog.Info($"Disconnected {count} stale slot signal handlers (focus_entered + Hovered + Unhovered).");
         }
         catch (Exception ex)
         {
