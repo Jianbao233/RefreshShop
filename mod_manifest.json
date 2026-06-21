@@ -1,10 +1,10 @@
 {
   "id": "RefreshShop",
   "pck_name": "RefreshShop",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "name": "商店刷新 / Refresh Shop",
   "author": "@Bilibili我叫煎包",
-  "description": "为商店增加可配置的刷新入口：支持刷新次数、刷新价格、是否补货。默认 5 次/25 金币/不补货，可在 ModConfig 中调整。刷新只影响本地玩家自己的商店，联机安全。\nAdds a configurable refresh action for the local player's merchant: refresh count, refresh cost, and refill toggle. Defaults to 5 uses / 25 gold / no refill, adjustable in ModConfig. Multiplayer-safe (local-only).",
+  "description": "为商店增加可配置的刷新入口：支持刷新次数、刷新价格、是否补货。默认 5 次/25 金币/不补货，可在 ModConfig 中调整。刷新只影响本地玩家自己的商店，不消耗遗物池/药水池，联机安全。\nAdds a configurable refresh action for the local player's merchant: refresh count, refresh cost, and refill toggle. Defaults to 5 uses / 25 gold / no refill, adjustable in ModConfig. Does not consume relic/potion pools. Multiplayer-safe (local-only).",
   "has_pck": false,
   "has_dll": true,
   "affects_gameplay": false
