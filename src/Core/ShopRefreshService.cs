@@ -1,136 +1,212 @@
 using System;
 using System.Collections;
+using System.Collections.Generic;
+using System.Linq;
 using System.Reflection;
-using Godot;
 
 namespace RefreshShop;
 
 /// <summary>
-/// 商店重建服务：通过 MerchantInventory.CreateForNormalMerchant 重建整个商店。
-/// 不手动修改条目、不碰遗物池回填，完全依赖游戏自带工厂和 bag 自动补充机制。
-///
-/// v0.1.1 修复（2026-06-18）：
-///   原实现直接清空 Inventory backing field 后再调 NMerchantInventory.Initialize 二次。
-///   STS2 0.107 的 Initialize 没有"取消订阅旧 entries / 断开旧 slot 信号"的反向操作，
-///   重复 Initialize 会导致：
-///     - 旧 entry 上的 PurchaseCompleted/Failed 委托累积
-///     - 旧 NMerchantSlot 的 FocusEntered 信号重复 Connect（日志报 "Signal already connected"）
-///     - 旧 NMerchantCard / NMerchantRelic / NMerchantPotion 的内部 _cardNode/_relicNode/_potionNode
-///       在 FillSlot 时 QueueFreeSafely 但延迟一帧才真正释放
-///   叠加 RitsuLib `GoldLossLifecyclePatch` → `GoldLostEvent` 同步分发到 RitsuLib 内部商店
-///   视觉刷新订阅者，访问 disposed MegaLabel → ObjectDisposedException → OnTryPurchase
-///   后半段被吞掉（金币扣了但东西没买到 / RewardObtainedMessage 没发出去）。
-///
-///   修复策略：
-///     1. 在替换 Inventory 之前，遍历旧 entries 解订阅 NMerchantInventory.OnPurchaseCompleted /
-///        merchantDialogue.ShowForPurchaseAttempt（用反射拿 private 委托）
-///     2. 遍历所有 NMerchantSlot，断开 FocusEntered 信号（避免重复 Connect 报错）
-///     3. await 一帧让 QueueFreeSafely 落地（确保 disposed 节点被 GC 前的引用都先释放）
-///     4. 才走原来的 Initialize 路径
+/// 商店重建服务（v0.2.1）：不调 CreateForNormalMerchant，直接在现有 inventory 上替换 entries 的 Model。
+/// 不消耗 grab bag / 药水池，实现无限刷新不影响商店外事件。
 /// </summary>
 internal static class ShopRefreshService
 {
-    /// <summary>
-    /// 用 CreateForNormalMerchant 重建当前玩家的商店，并刷新 UI。
-    /// inventoryNode 是 NMerchantInventory Control 实例。
-    /// </summary>
+    // 反射缓存
+    private static Type _merchantInventoryType;
+    private static Type _merchantRelicEntryType;
+    private static Type _merchantPotionEntryType;
+    private static Type _merchantCardEntryType;
+    private static Type _relicModelType;
+    private static Type _potionModelType;
+    private static Type _modelIdType;
+    private static Type _modelDbType;
+    private static Type _relicFactoryType;
+    private static Type _playerType;
+    private static Type _relicRarityType;
+
+    private static PropertyInfo _inventoryProp;
+    private static PropertyInfo _playerProp;
+    private static PropertyInfo _relicEntriesProp;
+    private static PropertyInfo _potionEntriesProp;
+    private static PropertyInfo _characterCardEntriesProp;
+    private static PropertyInfo _colorlessCardEntriesProp;
+    private static PropertyInfo _allEntriesProp;
+
+    private static PropertyInfo _relicEntryModelProp;
+    private static MethodInfo _relicEntrySetModelMethod;
+    private static PropertyInfo _relicEntryIsStockedProp;
+    private static PropertyInfo _relicModelIdProp;
+    private static PropertyInfo _relicModelRarityProp;
+    private static PropertyInfo _relicModelIsAllowedInShopsProp;
+    private static MethodInfo _relicModelToMutableMethod;
+
+    private static PropertyInfo _potionEntryModelProp;
+    private static PropertyInfo _potionEntryIsStockedProp;
+    private static PropertyInfo _potionModelIdProp;
+    private static MethodInfo _potionModelToMutableMethod;
+    private static MethodInfo _potionEntryCalcCostMethod;
+
+    private static MethodInfo _cardEntryPopulateMethod;
+    private static PropertyInfo _cardEntryIsStockedProp;
+
+    private static PropertyInfo _allRelicsProp;
+    private static PropertyInfo _allPotionsProp;
+
+    private static MethodInfo _rollRarityMethod;
+    private static PropertyInfo _playerRngProp;
+    private static PropertyInfo _shopsRngProp;
+    private static MethodInfo _rngNextIntMethod;
+
+    private static PropertyInfo _playerRelicsProp;
+    private static PropertyInfo _modelIdEntryProp;
+
+    private static MethodInfo _onMerchantInventoryUpdatedMethod;
+
+    private static bool _init;
+    private static bool _initFailed;
+
+    private static void EnsureInit()
+    {
+        if (_init || _initFailed) return;
+        _init = true;
+
+        try
+        {
+            _merchantInventoryType = FindType("MegaCrit.Sts2.Core.Entities.Merchant.MerchantInventory");
+            _merchantRelicEntryType = FindType("MegaCrit.Sts2.Core.Entities.Merchant.MerchantRelicEntry");
+            _merchantPotionEntryType = FindType("MegaCrit.Sts2.Core.Entities.Merchant.MerchantPotionEntry");
+            _merchantCardEntryType = FindType("MegaCrit.Sts2.Core.Entities.Merchant.MerchantCardEntry");
+            _relicModelType = FindType("MegaCrit.Sts2.Core.Models.RelicModel");
+            _potionModelType = FindType("MegaCrit.Sts2.Core.Models.PotionModel");
+            _modelIdType = FindType("MegaCrit.Sts2.Core.Models.ModelId");
+            _modelDbType = FindType("MegaCrit.Sts2.Core.Models.ModelDb");
+            _relicFactoryType = FindType("MegaCrit.Sts2.Core.Factories.RelicFactory");
+            _playerType = FindType("MegaCrit.Sts2.Core.Entities.Players.Player");
+            _relicRarityType = FindType("MegaCrit.Sts2.Core.Models.RelicRarity") ?? FindType("MegaCrit.Sts2.Core.Models.Relics.RelicRarity");
+
+            if (_merchantInventoryType == null || _merchantRelicEntryType == null || _merchantPotionEntryType == null
+                || _relicModelType == null || _potionModelType == null || _modelIdType == null
+                || _modelDbType == null || _relicFactoryType == null || _playerType == null)
+            {
+                _initFailed = true;
+                return;
+            }
+
+            // NMerchantInventory 是 UI 节点，MerchantInventory 是数据对象
+            // inventoryNode 是 NMerchantInventory，需要从它的类型获取 Inventory 属性
+            // Player / RelicEntries / PotionEntries 等在 MerchantInventory 上
+            var nMerchantInventoryType = FindType("MegaCrit.Sts2.Core.Nodes.Screens.Shops.NMerchantInventory");
+            _inventoryProp = nMerchantInventoryType?.GetProperty("Inventory") ?? _merchantInventoryType.GetProperty("Inventory");
+            _playerProp = _merchantInventoryType.GetProperty("Player");
+            _relicEntriesProp = _merchantInventoryType.GetProperty("RelicEntries");
+            _potionEntriesProp = _merchantInventoryType.GetProperty("PotionEntries");
+            _characterCardEntriesProp = _merchantInventoryType.GetProperty("CharacterCardEntries");
+            _colorlessCardEntriesProp = _merchantInventoryType.GetProperty("ColorlessCardEntries");
+            _allEntriesProp = _merchantInventoryType.GetProperty("AllEntries");
+
+            // Relic entry
+            _relicEntryModelProp = _merchantRelicEntryType.GetProperty("Model");
+            _relicEntrySetModelMethod = _merchantRelicEntryType.GetMethod("SetModel", BindingFlags.NonPublic | BindingFlags.Instance);
+            _relicEntryIsStockedProp = FindAbstractProp(_merchantRelicEntryType, "IsStocked");
+
+            // Relic model
+            _relicModelIdProp = FindAbstractProp(_relicModelType, "Id") ?? _relicModelType.GetProperty("Id");
+            _relicModelRarityProp = _relicModelType.GetProperty("Rarity");
+            _relicModelIsAllowedInShopsProp = _relicModelType.GetProperty("IsAllowedInShops");
+            _relicModelToMutableMethod = _relicModelType.GetMethod("ToMutable", Type.EmptyTypes);
+
+            // Potion entry
+            _potionEntryModelProp = _merchantPotionEntryType.GetProperty("Model");
+            _potionEntryIsStockedProp = FindAbstractProp(_merchantPotionEntryType, "IsStocked");
+            _potionEntryCalcCostMethod = _merchantPotionEntryType.GetMethod("CalcCost", BindingFlags.Public | BindingFlags.Instance);
+
+            // Potion model
+            _potionModelIdProp = FindAbstractProp(_potionModelType, "Id") ?? _potionModelType.GetProperty("Id");
+            _potionModelToMutableMethod = _potionModelType.GetMethod("ToMutable", Type.EmptyTypes);
+
+            // Card entry
+            _cardEntryPopulateMethod = _merchantCardEntryType.GetMethod("Populate", BindingFlags.Public | BindingFlags.Instance);
+            _cardEntryIsStockedProp = FindAbstractProp(_merchantCardEntryType, "IsStocked");
+
+            // ModelDb
+            _allRelicsProp = _modelDbType.GetProperty("AllRelics", BindingFlags.Public | BindingFlags.Static);
+            _allPotionsProp = _modelDbType.GetProperty("AllPotions", BindingFlags.Public | BindingFlags.Static);
+
+            // RelicFactory
+            foreach (var m in _relicFactoryType.GetMethods(BindingFlags.Public | BindingFlags.Static))
+            {
+                if (m.Name == "RollRarity" && m.GetParameters().Length == 1)
+                {
+                    _rollRarityMethod = m;
+                    break;
+                }
+            }
+
+            // Player
+            _playerRngProp = _playerType.GetProperty("PlayerRng");
+            _shopsRngProp = _playerRngProp?.PropertyType.GetProperty("Shops");
+            _rngNextIntMethod = _shopsRngProp?.PropertyType.GetMethod("NextInt", new[] { typeof(int) });
+            _playerRelicsProp = _playerType.GetProperty("Relics");
+
+            // ModelId
+            _modelIdEntryProp = _modelIdType.GetProperty("Entry");
+
+            // MerchantEntry.OnMerchantInventoryUpdated
+            var merchantEntryType = FindType("MegaCrit.Sts2.Core.Entities.Merchant.MerchantEntry");
+            _onMerchantInventoryUpdatedMethod = merchantEntryType?.GetMethod("OnMerchantInventoryUpdated", BindingFlags.Public | BindingFlags.Instance);
+
+            if (_relicEntrySetModelMethod == null || _rollRarityMethod == null || _allRelicsProp == null || _allPotionsProp == null)
+            {
+                RefreshShopLog.Warn("ShopRefreshService: some reflection targets not found.");
+                _initFailed = true;
+            }
+        }
+        catch (Exception ex)
+        {
+            RefreshShopLog.Error($"ShopRefreshService init failed: {ex.Message}");
+            _initFailed = true;
+        }
+    }
+
     public static bool RebuildShop(object inventoryNode, bool refillsPurchased = true)
     {
         if (inventoryNode == null) return false;
 
+        EnsureInit();
+        if (_initFailed)
+        {
+            RefreshShopLog.Warn("ShopRefreshService not initialized.");
+            return false;
+        }
+
         try
         {
             var invType = inventoryNode.GetType();
+            var inventory = _inventoryProp?.GetValue(inventoryNode);
+            if (inventory == null) return false;
 
-            // 1. 拿当前 Inventory 和 Player
-            var invProp = invType.GetProperty("Inventory");
-            var oldInventory = invProp?.GetValue(inventoryNode);
-            if (oldInventory == null) return false;
-
-            var oldInvType = oldInventory.GetType();
-            var playerProp = oldInvType.GetProperty("Player");
-            var player = playerProp?.GetValue(oldInventory);
+            var player = _playerProp?.GetValue(inventory);
             if (player == null) return false;
 
-            // 2. 调 MerchantInventory.CreateForNormalMerchant(player)
-            var merchantInvType = FindType("MegaCrit.Sts2.Core.Entities.Merchant.MerchantInventory");
-            var createMethod = merchantInvType?.GetMethod("CreateForNormalMerchant",
-                BindingFlags.Public | BindingFlags.Static);
-            if (createMethod == null) return false;
+            var shopsRng = GetShopsRng(player);
 
-            var newInventory = createMethod.Invoke(null, new[] { player });
-            if (newInventory == null) return false;
+            // 1. 替换遗物
+            RerollRelics(inventory, player, shopsRng, refillsPurchased);
 
-            // 2b. 不补货模式：对旧 inventory 中 IsStocked==false 的位置，
-            //     在新 inventory 对应 entry 上调 ClearAfterPurchase（protected abstract，反射）
-            //     使其 IsStocked 变 false。后续 Initialize 的 FillSlot 会自然显示空槽。
-            if (!refillsPurchased)
-            {
-                PreserveEmptySlots(oldInventory, newInventory);
-            }
+            // 2. 替换药水
+            RerollPotions(inventory, player, shopsRng, refillsPurchased);
 
-            // 3. 替换 MerchantRoom.Inventory（room 层；UI 层在第 6 步替换）
-            var nMerchantRoomType = FindType("MegaCrit.Sts2.Core.Nodes.Rooms.NMerchantRoom");
-            var instanceProp = nMerchantRoomType?.GetProperty("Instance",
-                BindingFlags.Public | BindingFlags.Static);
-            var nMerchantRoom = instanceProp?.GetValue(null);
-            if (nMerchantRoom != null)
-            {
-                var roomProp = nMerchantRoom.GetType().GetProperty("Room");
-                var merchantRoom = roomProp?.GetValue(nMerchantRoom);
-                if (merchantRoom != null)
-                {
-                    var roomInvField = merchantRoom.GetType()
-                        .GetField("<Inventory>k__BackingField",
-                            BindingFlags.NonPublic | BindingFlags.Instance);
-                    roomInvField?.SetValue(merchantRoom, newInventory);
-                }
-            }
+            // 3. 替换卡牌
+            RerollCards(inventory, refillsPurchased);
 
-            // 4. 获取 dialogue
-            object dialogue = null;
-            if (nMerchantRoom != null)
-            {
-                var dialogueField = nMerchantRoom.GetType()
-                    .GetField("_dialogue",
-                        BindingFlags.NonPublic | BindingFlags.Instance);
-                dialogue = dialogueField?.GetValue(nMerchantRoom);
-            }
+            // 4. 触发 UI 刷新（含补货 slot 恢复）
+            TriggerUiRefresh(inventoryNode, inventory);
 
-            // 5a. 解订阅旧 entries 上的 NMerchantInventory.OnPurchaseCompleted 委托和
-            //     merchantDialogue.ShowForPurchaseAttempt 委托。
-            //     避免再次 Initialize 的 SubscribeToEntries 累积订阅。
-            UnsubscribeOldEntries(inventoryNode, oldInventory);
+            // 5. MerchantBlacklist 兼容
+            TryApplyBlacklistFilter(inventory);
 
-            // 5b. 遍历旧 NMerchantSlot 子节点，断开 FocusEntered 信号
-            //     避免再次 Initialize 时 slot.Connect(FocusEntered, ...) 报 "already connected"
-            DisconnectOldSlotSignals(inventoryNode);
-
-            // 5c. 清空 NMerchantInventory 的 Inventory backing field
-            //     （Initialize 内部 if (Inventory != null) throw）
-            var uiInvField = invType.GetField("<Inventory>k__BackingField",
-                BindingFlags.NonPublic | BindingFlags.Instance);
-            uiInvField?.SetValue(inventoryNode, null);
-
-            // 6. 重新 Initialize
-            //     Initialize 内部对每个容器内的 NMerchantCard/Relic/Potion 调 FillSlot；
-            //     FillSlot 自身会 QueueFreeSafely 旧的 _cardNode/_relicNode/_potionNode。
-            var initMethod = invType.GetMethod("Initialize",
-                BindingFlags.Public | BindingFlags.Instance);
-            initMethod?.Invoke(inventoryNode, new[] { newInventory, dialogue });
-
-            // 7. UpdateNavigation
-            var navMethod = invType.GetMethod("UpdateNavigation",
-                BindingFlags.NonPublic | BindingFlags.Instance);
-            navMethod?.Invoke(inventoryNode, null);
-
-            // 8. 强制恢复 hidden slot 的可见性
-            // NMerchantRelic.UpdateVisual 在购买后设 Visible=false，Initialize 的 FillSlot
-            // 虽然更新了 _relicEntry，但 _relicNode 延迟释放导致 UpdateVisual 可能没重建节点。
-            // 这里遍历所有 slot，对 !Visible 的强制恢复并重新调 UpdateVisual。
-            ForceRestoreSlotVisibility(inventoryNode, newInventory);
-
-            RefreshShopLog.Info("Shop rebuilt via CreateForNormalMerchant.");
+            RefreshShopLog.Info("Shop refreshed (no grab bag consumption).");
             return true;
         }
         catch (Exception ex)
@@ -140,233 +216,262 @@ internal static class ShopRefreshService
         }
     }
 
-    /// <summary>
-    /// 遍历所有 slot，对 Visible=false 的强制恢复可见性 + 重新调 UpdateVisual。
-    /// NMerchantRelic/NMerchantCard/NMerchantPotion 在购买后设 Visible=false，
-    /// Initialize 的 FillSlot 虽然更新了 entry，但 _relicNode 等延迟释放导致
-    /// UpdateVisual 可能没重建视觉节点。这里强制走一遍 UpdateVisual 确保恢复。
-    /// </summary>
-    private static void ForceRestoreSlotVisibility(object inventoryNode, object newInventory)
+    private static void RerollRelics(object inventory, object player, object shopsRng, bool refillsPurchased)
     {
-        try
+        var relics = _relicEntriesProp?.GetValue(inventory) as IEnumerable;
+        if (relics == null) return;
+
+        var alreadyChosen = new HashSet<string>(StringComparer.Ordinal);
+        var relicList = new List<object>();
+        foreach (var r in relics) relicList.Add(r);
+
+        // 收集已有遗物 ID
+        var playerRelics = _playerRelicsProp?.GetValue(player) as IEnumerable;
+        var ownedRelicIds = new HashSet<string>(StringComparer.Ordinal);
+        if (playerRelics != null)
         {
-            var invType = inventoryNode.GetType();
-            var getAllSlots = invType.GetMethod("GetAllSlots", BindingFlags.Public | BindingFlags.Instance);
-            if (getAllSlots == null) return;
-
-            var slots = getAllSlots.Invoke(inventoryNode, null) as IEnumerable;
-            if (slots == null) return;
-
-            int restored = 0;
-            foreach (var slotObj in slots)
+            foreach (var pr in playerRelics)
             {
-                if (slotObj is not Control slot) continue;
+                var id = GetModelId(pr, _relicModelIdProp);
+                if (id != null) ownedRelicIds.Add(id);
+            }
+        }
 
-                // 检查 slot 上的 Entry 是否 IsStocked
+        foreach (var entry in relicList)
+        {
+            var isStocked = (bool)(_relicEntryIsStockedProp?.GetValue(entry) ?? false);
+            if (!isStocked && !refillsPurchased) continue;
+
+            // Roll rarity
+            var rarity = _rollRarityMethod.Invoke(null, new[] { player });
+
+            // 从 ModelDb.AllRelics 选候选
+            var allRelics = _allRelicsProp.GetValue(null) as IEnumerable;
+            if (allRelics == null) continue;
+
+            var candidates = new List<object>();
+            foreach (var relic in allRelics)
+            {
+                if (relic == null) continue;
+                var id = GetModelId(relic, _relicModelIdProp);
+                if (string.IsNullOrEmpty(id)) continue;
+                if (alreadyChosen.Contains(id)) continue;
+                if (ownedRelicIds.Contains(id)) continue;
+                if (IsRelicBannedByBlacklist(id)) continue;
+
+                var relicRarity = _relicModelRarityProp?.GetValue(relic);
+                if (relicRarity == null || !relicRarity.Equals(rarity)) continue;
+
+                var allowed = (bool)(_relicModelIsAllowedInShopsProp?.GetValue(relic) ?? false);
+                if (!allowed) continue;
+
+                candidates.Add(relic);
+            }
+
+            if (candidates.Count == 0) continue;
+
+            // 随机选一个
+            int index = RngNextInt(shopsRng, candidates.Count);
+            var chosen = candidates[index % candidates.Count];
+            var chosenId = GetModelId(chosen, _relicModelIdProp);
+            if (chosenId != null) alreadyChosen.Add(chosenId);
+
+            // 反射调 SetModel(chosen.ToMutable())
+            var mutable = _relicModelToMutableMethod?.Invoke(chosen, null) ?? chosen;
+            _relicEntrySetModelMethod?.Invoke(entry, new[] { mutable });
+        }
+    }
+
+    private static void RerollPotions(object inventory, object player, object shopsRng, bool refillsPurchased)
+    {
+        var potions = _potionEntriesProp?.GetValue(inventory) as IEnumerable;
+        if (potions == null) return;
+
+        var alreadyChosen = new HashSet<string>(StringComparer.Ordinal);
+        var potionList = new List<object>();
+        foreach (var p in potions) potionList.Add(p);
+
+        var allPotions = _allPotionsProp?.GetValue(null) as IEnumerable;
+        if (allPotions == null) return;
+
+        // 预收集所有药水 canonical 实例
+        var allPotionList = new List<object>();
+        foreach (var potion in allPotions)
+        {
+            if (potion == null) continue;
+            allPotionList.Add(potion);
+        }
+
+        foreach (var entry in potionList)
+        {
+            var isStocked = (bool)(_potionEntryIsStockedProp?.GetValue(entry) ?? false);
+            if (!isStocked && !refillsPurchased) continue;
+
+            var candidates = new List<object>();
+            foreach (var potion in allPotionList)
+            {
+                var id = GetModelId(potion, _potionModelIdProp);
+                if (string.IsNullOrEmpty(id)) continue;
+                if (alreadyChosen.Contains(id)) continue;
+                if (IsPotionBannedByBlacklist(id)) continue;
+                candidates.Add(potion);
+            }
+
+            if (candidates.Count == 0) continue;
+
+            int index = RngNextInt(shopsRng, candidates.Count);
+            var chosen = candidates[index % candidates.Count];
+            var chosenId = GetModelId(chosen, _potionModelIdProp);
+            if (chosenId != null) alreadyChosen.Add(chosenId);
+
+            // 反射设 Model = chosen.ToMutable()
+            var mutable = _potionModelToMutableMethod?.Invoke(chosen, null) ?? chosen;
+            // Model 是 private set，用反射
+            var modelSetter = _potionEntryModelProp.GetSetMethod(true);
+            modelSetter?.Invoke(entry, new[] { mutable });
+            _potionEntryCalcCostMethod?.Invoke(entry, null);
+        }
+    }
+
+    private static void RerollCards(object inventory, bool refillsPurchased)
+    {
+        // CharacterCardEntries
+        RerollCardEntries(_characterCardEntriesProp?.GetValue(inventory) as IEnumerable, refillsPurchased);
+        // ColorlessCardEntries
+        RerollCardEntries(_colorlessCardEntriesProp?.GetValue(inventory) as IEnumerable, refillsPurchased);
+    }
+
+    private static void RerollCardEntries(IEnumerable entries, bool refillsPurchased)
+    {
+        if (entries == null) return;
+        foreach (var entry in entries)
+        {
+            if (entry == null) continue;
+            var isStocked = (bool)(_cardEntryIsStockedProp?.GetValue(entry) ?? false);
+            if (!isStocked && !refillsPurchased) continue;
+
+            // Populate() 是 public，从卡池重新选卡，不消耗池子
+            _cardEntryPopulateMethod?.Invoke(entry, null);
+        }
+    }
+
+    private static void TriggerUiRefresh(object inventoryNode, object inventory)
+    {
+        // 1. 遍历 AllEntries，调 OnMerchantInventoryUpdated() 触发 EntryUpdated 事件
+        var allEntries = _allEntriesProp?.GetValue(inventory) as IEnumerable;
+        if (allEntries != null)
+        {
+            foreach (var entry in allEntries)
+            {
+                if (entry == null) continue;
+                try { _onMerchantInventoryUpdatedMethod?.Invoke(entry, null); }
+                catch { }
+            }
+        }
+
+        // 2. 遍历 GetAllSlots()，对 IsStocked 但 !Visible 的 slot 强制恢复 + UpdateVisual
+        var invType = inventoryNode.GetType();
+        var getAllSlotsMethod = invType.GetMethod("GetAllSlots", BindingFlags.Public | BindingFlags.Instance);
+        var slots = getAllSlotsMethod?.Invoke(inventoryNode, null) as IEnumerable;
+        if (slots == null) return;
+
+        foreach (var slotObj in slots)
+        {
+            if (slotObj is not Godot.Control slot) continue;
+            try
+            {
+                // 获取 slot 的 Entry
                 var entryProp = slot.GetType().GetProperty("Entry");
                 var entry = entryProp?.GetValue(slot);
                 if (entry == null) continue;
 
+                // 检查 IsStocked
                 var isStockedProp = entry.GetType().GetProperty("IsStocked");
                 if (isStockedProp == null) continue;
-                var stockedVal = isStockedProp.GetValue(entry);
-                if (stockedVal is bool isStocked && !isStocked) continue; // 确实没货，不恢复
+                var isStocked = (bool)isStockedProp.GetValue(entry);
 
-                // 有货但 Visible=false → 强制恢复
-                if (!slot.Visible)
+                if (isStocked && !slot.Visible)
                 {
+                    // 补货的 slot：强制恢复可见性
                     slot.Visible = true;
-                    slot.MouseFilter = Control.MouseFilterEnum.Stop;
-                    restored++;
+                    slot.MouseFilter = Godot.Control.MouseFilterEnum.Stop;
                 }
 
-                // 重新调 UpdateVisual（非 public virtual）
+                // 调 UpdateVisual 重建视觉节点
                 var updateVisual = slot.GetType().GetMethod("UpdateVisual",
                     BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Public);
                 updateVisual?.Invoke(slot, null);
             }
-
-            if (restored > 0)
-                RefreshShopLog.Info($"Force restored {restored} hidden slot(s) to visible.");
-        }
-        catch (Exception ex)
-        {
-            RefreshShopLog.Warn($"ForceRestoreSlotVisibility failed (non-fatal): {ex.Message}");
+            catch { }
         }
     }
 
-    /// <summary>
-    /// 不补货模式：遍历旧 inventory 的 AllEntries，对 IsStocked==false 的位置，
-    /// 在新 inventory 对应位置 entry 上调 ClearAfterPurchase（protected abstract，反射）
-    /// 使其 IsStocked 变 false。后续 Initialize → FillSlot 会自然显示空槽。
-    ///
-    /// AllEntries 顺序：CharacterCardEntries + ColorlessCardEntries + RelicEntries + PotionEntries + CardRemovalEntry。
-    /// 新旧 inventory 结构相同（同 CreateForNormalMerchant），按索引对应。
-    /// </summary>
-    private static void PreserveEmptySlots(object oldInventory, object newInventory)
+    private static void TryApplyBlacklistFilter(object inventory)
     {
         try
         {
-            var oldInvType = oldInventory.GetType();
-            var newInvType = newInventory.GetType();
+            var filterType = FindType("MerchantBlacklist.Core.InventoryFilter");
+            if (filterType == null) return;
 
-            var allEntriesProp = oldInvType.GetProperty("AllEntries");
-            if (allEntriesProp == null) return;
-            var oldEntries = allEntriesProp.GetValue(oldInventory) as IEnumerable;
-            if (oldEntries == null) return;
-
-            var newEntries = newInvType.GetProperty("AllEntries")?.GetValue(newInventory) as IEnumerable;
-            if (newEntries == null) return;
-
-            var oldList = new System.Collections.Generic.List<object>();
-            foreach (var e in oldEntries) oldList.Add(e);
-            var newList = new System.Collections.Generic.List<object>();
-            foreach (var e in newEntries) newList.Add(e);
-
-            int cleared = 0;
-            int count = System.Math.Min(oldList.Count, newList.Count);
-            for (int i = 0; i < count; i++)
-            {
-                var oldEntry = oldList[i];
-                if (oldEntry == null) continue;
-
-                var isStockedProp = oldEntry.GetType().GetProperty("IsStocked");
-                if (isStockedProp == null) continue;
-                var stocked = isStockedProp.GetValue(oldEntry);
-                if (stocked is bool b && b) continue; // 仍有货，不用处理
-
-                // 旧槽已空 → 对新 entry 调 ClearAfterPurchase
-                var newEntry = newList[i];
-                if (newEntry == null) continue;
-                var clearMethod = newEntry.GetType().GetMethod(
-                    "ClearAfterPurchase",
-                    BindingFlags.NonPublic | BindingFlags.Instance);
-                clearMethod?.Invoke(newEntry, null);
-                cleared++;
-            }
-            if (cleared > 0)
-                RefreshShopLog.Info($"Preserved {cleared} empty slot(s) (no refill).");
+            var applyMethod = filterType.GetMethod("ApplyToInventory", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
+            applyMethod?.Invoke(null, new[] { inventory });
         }
-        catch (Exception ex)
-        {
-            RefreshShopLog.Warn($"PreserveEmptySlots failed (non-fatal): {ex.Message}");
-        }
+        catch { /* MerchantBlacklist 不在场或调用失败，忽略 */ }
     }
 
-    /// <summary>
-    /// 解订阅旧 inventory 上每个 entry 的 PurchaseCompleted / PurchaseFailed 委托。
-    /// 委托归属：
-    ///   - NMerchantInventory.SubscribeToEntries 把每个 entry.PurchaseCompleted +=
-    ///     this.OnPurchaseCompleted（NMerchantInventory 私有实例方法）
-    ///   - 同时 entry.PurchaseFailed += merchantDialogue.ShowForPurchaseAttempt
-    /// 反射定位这两个目标方法，再用对应签名的 Delegate.CreateDelegate 构造 -= 句柄。
-    /// </summary>
-    private static void UnsubscribeOldEntries(object invNode, object oldInventory)
+    private static bool IsRelicBannedByBlacklist(string relicId)
     {
         try
         {
-            var invType = invNode.GetType();
-            var oldInvType = oldInventory.GetType();
-
-            var allEntriesProp = oldInvType.GetProperty("AllEntries");
-            if (!(allEntriesProp?.GetValue(oldInventory) is IEnumerable entries)) return;
-
-            // OnPurchaseCompleted 是 NMerchantInventory 的 private 实例方法
-            var onPurchaseCompleted = invType.GetMethod("OnPurchaseCompleted",
-                BindingFlags.NonPublic | BindingFlags.Instance);
-
-            // _merchantDialogue 是 NMerchantInventory 的 private 字段
-            var dialogueField = invType.GetField("_merchantDialogue",
-                BindingFlags.NonPublic | BindingFlags.Instance);
-            var dialogue = dialogueField?.GetValue(invNode);
-            var showForPurchaseAttempt = dialogue?.GetType().GetMethod("ShowForPurchaseAttempt",
-                BindingFlags.Public | BindingFlags.Instance);
-
-            int count = 0;
-            foreach (var entry in entries)
-            {
-                if (entry == null) continue;
-                var entryType = entry.GetType();
-
-                // PurchaseCompleted 是 event Action<PurchaseStatus, MerchantEntry>
-                var pcEvent = FindEventRecursive(entryType, "PurchaseCompleted");
-                if (pcEvent != null && onPurchaseCompleted != null)
-                {
-                    var d = Delegate.CreateDelegate(pcEvent.EventHandlerType, invNode, onPurchaseCompleted, false);
-                    if (d != null) pcEvent.RemoveEventHandler(entry, d);
-                }
-
-                // PurchaseFailed 是 event Action<PurchaseStatus>
-                var pfEvent = FindEventRecursive(entryType, "PurchaseFailed");
-                if (pfEvent != null && showForPurchaseAttempt != null && dialogue != null)
-                {
-                    var d = Delegate.CreateDelegate(pfEvent.EventHandlerType, dialogue, showForPurchaseAttempt, false);
-                    if (d != null) pfEvent.RemoveEventHandler(entry, d);
-                }
-                count++;
-            }
-            RefreshShopLog.Info($"Unsubscribed {count} old entries.");
+            var storeType = FindType("MerchantBlacklist.Core.BlacklistStore");
+            if (storeType == null) return false;
+            var method = storeType.GetMethod("IsRelicBanned", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
+            return (bool)(method?.Invoke(null, new object[] { relicId }) ?? false);
         }
-        catch (Exception ex)
-        {
-            RefreshShopLog.Warn($"UnsubscribeOldEntries failed (non-fatal): {ex.Message}");
-        }
+        catch { return false; }
     }
 
-    /// <summary>
-    /// 遍历 NMerchantInventory.GetAllSlots() 返回的所有 NMerchantSlot，断开它们的
-    /// FocusEntered 信号连接。Initialize 内部会再 Connect 一次。
-    /// 不调用 SignalName.FocusEntered 的反射符号，直接用字符串 "focus_entered"
-    /// （Godot 4 的 native signal name 是 snake_case）。
-    /// </summary>
-    private static void DisconnectOldSlotSignals(object invNode)
+    private static bool IsPotionBannedByBlacklist(string potionId)
     {
         try
         {
-            var invType = invNode.GetType();
-            var getAllSlots = invType.GetMethod("GetAllSlots", BindingFlags.Public | BindingFlags.Instance);
-            if (getAllSlots == null) return;
-
-            if (!(getAllSlots.Invoke(invNode, null) is IEnumerable slots)) return;
-
-            int count = 0;
-            // 需要断开的信号列表：focus_entered + NMerchantSlot 的 Hovered/Unhovered
-            // NMerchantSlot.Initialize 里会重新 Connect Hovered/Unhovered，不断开会报 already connected
-            var signalNames = new[] { "focus_entered", "Hovered", "Unhovered" };
-            foreach (var slotObj in slots)
-            {
-                if (slotObj is not Node slotNode) continue;
-                foreach (var sigName in signalNames)
-                {
-                    try
-                    {
-                        foreach (var dict in slotNode.GetSignalConnectionList(sigName))
-                        {
-                            if (dict.TryGetValue("callable", out var c) && c.Obj is Callable callable)
-                            {
-                                slotNode.Disconnect(sigName, callable);
-                                count++;
-                            }
-                        }
-                    }
-                    catch { /* 单信号断开失败不影响其他 */ }
-                }
-            }
-            RefreshShopLog.Info($"Disconnected {count} stale slot signal handlers (focus_entered + Hovered + Unhovered).");
+            var storeType = FindType("MerchantBlacklist.Core.BlacklistStore");
+            if (storeType == null) return false;
+            var method = storeType.GetMethod("IsPotionBanned", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
+            return (bool)(method?.Invoke(null, new object[] { potionId }) ?? false);
         }
-        catch (Exception ex)
-        {
-            RefreshShopLog.Warn($"DisconnectOldSlotSignals failed (non-fatal): {ex.Message}");
-        }
+        catch { return false; }
     }
 
-    private static EventInfo FindEventRecursive(Type type, string name)
+    // ── 工具方法 ─────────────────────────────────────────────────────
+
+    private static object GetShopsRng(object player)
+    {
+        var rng = _playerRngProp?.GetValue(player);
+        return _shopsRngProp?.GetValue(rng);
+    }
+
+    private static int RngNextInt(object shopsRng, int max)
+    {
+        if (shopsRng == null || _rngNextIntMethod == null) return new Random().Next(max);
+        return (int)(_rngNextIntMethod.Invoke(shopsRng, new object[] { max }) ?? 0);
+    }
+
+    private static string GetModelId(object model, PropertyInfo idProp)
+    {
+        if (model == null || idProp == null) return null;
+        var id = idProp.GetValue(model);
+        if (id == null) return null;
+        return _modelIdEntryProp?.GetValue(id) as string;
+    }
+
+    private static PropertyInfo FindAbstractProp(Type type, string name)
     {
         var t = type;
         while (t != null)
         {
-            var e = t.GetEvent(name, BindingFlags.Public | BindingFlags.Instance | BindingFlags.NonPublic);
-            if (e != null) return e;
+            var p = t.GetProperty(name, BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly);
+            if (p != null) return p;
             t = t.BaseType;
         }
         return null;
