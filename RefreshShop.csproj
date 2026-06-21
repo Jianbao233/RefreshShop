@@ -11,4 +11,8 @@
   <ItemGroup>
     <PackageReference Include="Lib.Harmony" Version="2.3.3" />
   </ItemGroup>
+  <ItemGroup>
+    <AssemblyMetadata Include="RitsuLib.ModSettingsInterop.ProviderType" Value="RefreshShop.RitsuLibSettingsProvider" />
+    <AssemblyMetadata Include="RitsuLib.ModSettingsMirror.Mod.RefreshShop.DisableSources" Value="ModConfig" />
+  </ItemGroup>
 </Project>

@@ -31,6 +31,25 @@ internal static class RefreshShopConfig
 
     public static bool IsInfiniteUses => MaxUses == 0;
 
+    internal static void SetMaxUsesFromRitsuLib(int value)
+    {
+        MaxUses = ClampInt(value.ToString(), 0, 999);
+        RefreshCounter.ResetForNewShop();
+        TrySetModConfigValue(KeyMaxUses, MaxUses.ToString());
+    }
+
+    internal static void SetCostFromRitsuLib(int value)
+    {
+        Cost = ClampInt(value.ToString(), 0, 999);
+        TrySetModConfigValue(KeyCost, Cost.ToString());
+    }
+
+    internal static void SetRefillsPurchasedFromRitsuLib(bool value)
+    {
+        RefillsPurchased = value;
+        TrySetModConfigValue(KeyRefillsPurchased, value);
+    }
+
     /// <summary>
     /// 从 ModConfig 实时读取所有配置值。OnChanged 回调可能不被触发，
     /// 所以在关键操作前调用此方法确保读到最新值。
@@ -297,6 +316,20 @@ internal static class RefreshShopConfig
         if (p != null && p.CanWrite)
         {
             try { p.SetValue(target, value); } catch { }
+        }
+    }
+
+    private static void TrySetModConfigValue(string key, object value)
+    {
+        try
+        {
+            var apiType = FindType("ModConfig.ModConfigApi");
+            var setValue = apiType?.GetMethod("SetValue", BindingFlags.Public | BindingFlags.Static);
+            setValue?.Invoke(null, new object[] { RefreshShopMod.ModId, key, value });
+        }
+        catch (Exception ex)
+        {
+            RefreshShopLog.Warn($"ModConfig sync failed [{key}]: {ex.Message}");
         }
     }
 
