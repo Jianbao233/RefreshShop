@@ -49,6 +49,9 @@ internal static class ShopRefreshService
 
     private static MethodInfo _cardEntryPopulateMethod;
     private static PropertyInfo _cardEntryIsStockedProp;
+    private static PropertyInfo _cardEntryCreationResultProp;
+    private static PropertyInfo _creationResultCardProp;
+    private static PropertyInfo _cardModelIdProp;
 
     private static PropertyInfo _allRelicsProp;
     private static PropertyInfo _allPotionsProp;
@@ -128,6 +131,11 @@ internal static class ShopRefreshService
             // Card entry
             _cardEntryPopulateMethod = _merchantCardEntryType.GetMethod("Populate", BindingFlags.Public | BindingFlags.Instance);
             _cardEntryIsStockedProp = FindAbstractProp(_merchantCardEntryType, "IsStocked");
+            _cardEntryCreationResultProp = _merchantCardEntryType.GetProperty("CreationResult");
+            var cardCreationResultType = FindType("MegaCrit.Sts2.Core.Entities.Cards.CardCreationResult");
+            _creationResultCardProp = cardCreationResultType?.GetProperty("Card");
+            var cardModelType = FindType("MegaCrit.Sts2.Core.Models.CardModel");
+            _cardModelIdProp = FindAbstractProp(cardModelType, "Id") ?? cardModelType?.GetProperty("Id");
 
             // ModelDb
             _allRelicsProp = _modelDbType.GetProperty("AllRelics", BindingFlags.Public | BindingFlags.Static);
@@ -352,7 +360,31 @@ internal static class ShopRefreshService
 
             // Populate() 是 public，从卡池重新选卡，不消耗池子
             _cardEntryPopulateMethod?.Invoke(entry, null);
+
+            // ban 检查：如果 MerchantBlacklist 在场且新抽的卡被 ban，重抽最多 12 次
+            if (!IsCardBannedByBlacklist(GetCardIdFromEntry(entry))) continue;
+
+            for (int attempt = 0; attempt < 12; attempt++)
+            {
+                _cardEntryPopulateMethod?.Invoke(entry, null);
+                if (!IsCardBannedByBlacklist(GetCardIdFromEntry(entry))) break;
+            }
         }
+    }
+
+    private static string GetCardIdFromEntry(object entry)
+    {
+        try
+        {
+            var creationResult = _cardEntryCreationResultProp?.GetValue(entry);
+            if (creationResult == null) return null;
+            var card = _creationResultCardProp?.GetValue(creationResult);
+            if (card == null) return null;
+            var id = _cardModelIdProp?.GetValue(card);
+            if (id == null) return null;
+            return _modelIdEntryProp?.GetValue(id) as string;
+        }
+        catch { return null; }
     }
 
     private static void TriggerUiRefresh(object inventoryNode, object inventory)
@@ -439,6 +471,19 @@ internal static class ShopRefreshService
             if (storeType == null) return false;
             var method = storeType.GetMethod("IsPotionBanned", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
             return (bool)(method?.Invoke(null, new object[] { potionId }) ?? false);
+        }
+        catch { return false; }
+    }
+
+    private static bool IsCardBannedByBlacklist(string cardId)
+    {
+        if (string.IsNullOrEmpty(cardId)) return false;
+        try
+        {
+            var storeType = FindType("MerchantBlacklist.Core.BlacklistStore");
+            if (storeType == null) return false;
+            var method = storeType.GetMethod("IsCardBanned", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
+            return (bool)(method?.Invoke(null, new object[] { cardId }) ?? false);
         }
         catch { return false; }
     }
