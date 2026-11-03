@@ -2,6 +2,15 @@
 
 《杀戮尖塔 2》商店刷新 Mod。
 
+当前版本：**v0.2.3**。
+
+### v0.2.3
+
+- 修复通过 RitsuLib 修改设置后，重启游戏恢复默认值的问题；设置变更立即保存。
+- 修复旧 ModConfig 配置迁移不完整的问题，刷新次数、价格、补货开关一起迁移。
+- 已保存的配置优先于旧值；仍可在 RitsuLib 或 ModConfig 设置页修改。
+- 保存使用临时文件替换，写入失败时保留原配置。
+
 ## 功能
 
 在商店删卡服务右下角增加一个刷新按钮。点击后**重建本地玩家整个商店**，刷新所有卡牌、遗物、药水和删卡服务。
@@ -27,7 +36,19 @@
 1. 下载 `RefreshShop_v*.zip`
 2. 解压到 `Slay the Spire 2\mods\RefreshShop\`
 3. 文件夹内应有 `RefreshShop.dll` 和 `mod_manifest.json`
-4. 需要安装 ModConfig 才能在面板中调整配置
+4. 推荐安装 RitsuLib（或 ModConfig）以在设置页调整配置
+
+## 配置存储
+
+三项设置（刷新次数 / 刷新价格 / 补货开关）由本 mod 自己落盘，保存在：
+
+```text
+%APPDATA%\SlayTheSpire2\mods_settings\RefreshShop.json
+```
+
+- 修改后自动保存，重启游戏不会回落到默认值。
+- ModConfig 注册并载入旧文件后，自动迁移尚未保存的配置项；已保存的项保持不变。
+- 之后不再轮询 ModConfig 的旧值，但用户在其设置页的主动修改仍会保存。
 
 ## 构建
 
@@ -36,7 +57,11 @@ cd RefreshShop
 .\build.ps1
 ```
 
-构建脚本自动复制到游戏 mods 目录和 `torelease\`。
+构建脚本默认使用 Release，自动复制到游戏 mods 目录和 `torelease\`。
+
+仅编译（不部署）：`dotnet build -c Release`。
+
+配置回归测试：`powershell -ExecutionPolicy Bypass -File .\test-config.ps1`。测试在系统临时目录使用独立配置，覆盖跨进程恢复、旧配置迁移、设置回调和写入失败，不修改玩家配置。
 
 ## 开源协议
 

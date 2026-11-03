@@ -122,8 +122,13 @@ internal static class RitsuLibSettingsProvider
             RefreshShopConfig.SetRefillsPurchasedFromRitsuLib(value);
     }
 
+    /// <summary>
+    /// RitsuLib 设置 UI 在防抖后调用此方法持久化（binding.Save() → 提供器的 SaveRitsuLibSettings）。
+    /// 旧实现是空方法，导致设置只存在于内存、重启即回默认值。
+    /// </summary>
     public static void SaveRitsuLibSettings()
     {
+        RefreshShopConfig.SaveToDisk();
     }
 
     private static class Texts

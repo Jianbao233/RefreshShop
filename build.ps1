@@ -1,18 +1,19 @@
 param(
-    [string]$Configuration = "Debug"
+    [ValidateSet("Debug", "Release")]
+    [string]$Configuration = "Release"
 )
 
 $ErrorActionPreference = "Stop"
 $ProjectRoot = $PSScriptRoot
 $ModId = "RefreshShop"
-$GameModsDir = "K:\SteamLibrary\steamapps\common\Slay the Spire 2\mods\$ModId"
-$GameModsDirAlt = "C:\Users\Administrator\AppData\Roaming\SlayTheSpire2\mods\$ModId"
+$GameModsDir = "F:\Steam\steamapps\common\Slay the Spire 2\mods\$ModId"
+$GameModsDirAlt = "C:\Users\Jianbao\AppData\Roaming\SlayTheSpire2\mods\$ModId"
 
 Write-Host "=== RefreshShop Mod Build ===" -ForegroundColor Cyan
 Write-Host "Project: $ProjectRoot"
 
 Write-Host "[1/3] dotnet build..." -ForegroundColor Yellow
-dotnet build -c $Configuration --nologo -v q
+dotnet build (Join-Path $ProjectRoot "RefreshShop.csproj") -c $Configuration --nologo -v q
 if ($LASTEXITCODE -ne 0) { throw "dotnet build failed" }
 
 Write-Host "[2/3] Copy to mods directory..." -ForegroundColor Yellow
@@ -22,7 +23,7 @@ if (Test-Path $GameModsDir) {
 elseif (Test-Path $GameModsDirAlt) {
     $TargetDir = $GameModsDirAlt
 }
-elseif (Test-Path "K:\SteamLibrary\steamapps\common\Slay the Spire 2\mods") {
+elseif (Test-Path "F:\Steam\steamapps\common\Slay the Spire 2\mods") {
     $TargetDir = $GameModsDir
     New-Item -ItemType Directory -Force -Path $TargetDir | Out-Null
 }
@@ -38,7 +39,7 @@ if (Test-Path $DllPath) {
     Write-Host "  Copied RefreshShop.dll OK" -ForegroundColor Green
 }
 else {
-    Write-Host "  Warning: $DllPath not found" -ForegroundColor Yellow
+    throw "Build output missing: $DllPath"
 }
 
 if (Test-Path (Join-Path $ProjectRoot "mod_manifest.json")) {

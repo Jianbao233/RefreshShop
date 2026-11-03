@@ -1,6 +1,9 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Reflection;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace RefreshShop;
 
@@ -31,75 +34,234 @@ internal static class RefreshShopConfig
 
     public static bool IsInfiniteUses => MaxUses == 0;
 
-    internal static void SetMaxUsesFromRitsuLib(int value)
+    // ── 持久化 ────────────────────────────────────────────────────────
+    //
+    // 本 mod 自己落盘，不依赖 ModConfig。
+    //
+    // 原因：RitsuLib 的 runtime-interop 设置通道用 ModSettingsBindings.Callback 绑定，
+    // 该绑定明确「不使用 RitsuLibFramework.GetDataStore(modId)」，持久化责任在 mod 自己：
+    // 设置 UI 会在防抖后调 binding.Save() → 提供器的 SaveRitsuLibSettings()。
+    // 旧实现 SaveRitsuLibSettings() 是空方法，且 ModConfig 镜像源已在 csproj 中禁用，
+    // 导致每次启动都回落到默认值（玩家反馈 "custom settings go back to default on game start"）。
+
+    private static readonly object _gate = new();
+    private static bool _loaded;
+    private static bool _modConfigReady;
+    private static bool _registeringModConfig;
+    private static bool _syncingModConfig;
+
+    /// <summary>该键是否已由本 mod 的 JSON 提供（用于决定是否还从 ModConfig 导入）。</summary>
+    private static bool _hasMaxUses;
+    private static bool _hasCost;
+    private static bool _hasRefillsPurchased;
+
+    static RefreshShopConfig()
     {
-        MaxUses = ClampInt(value.ToString(), 0, 999);
-        RefreshCounter.ResetForNewShop();
-        TrySetModConfigValue(KeyMaxUses, MaxUses.ToString());
+        LoadFromDisk();
     }
 
-    internal static void SetCostFromRitsuLib(int value)
+    public static string SettingsPath
     {
-        Cost = ClampInt(value.ToString(), 0, 999);
-        TrySetModConfigValue(KeyCost, Cost.ToString());
+        get
+        {
+            var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+            var dir = Path.Combine(appData, "SlayTheSpire2", "mods_settings");
+            return Path.Combine(dir, "RefreshShop.json");
+        }
     }
 
-    internal static void SetRefillsPurchasedFromRitsuLib(bool value)
+    /// <summary>从 mods_settings/RefreshShop.json 读取设置。只执行一次。</summary>
+    public static void LoadFromDisk()
     {
-        RefillsPurchased = value;
-        TrySetModConfigValue(KeyRefillsPurchased, value);
-    }
-
-    /// <summary>
-    /// 从 ModConfig 实时读取所有配置值。OnChanged 回调可能不被触发，
-    /// 所以在关键操作前调用此方法确保读到最新值。
-    /// </summary>
-    public static void RefreshFromModConfig()
-    {
-        var apiType = FindType("ModConfig.ModConfigApi");
-        if (apiType == null) return;
+        lock (_gate)
+        {
+            if (_loaded) return;
+            _loaded = true;
+        }
 
         try
         {
-            var getValue = apiType.GetMethod("GetValue", BindingFlags.Public | BindingFlags.Static);
-            if (getValue == null) return;
-
-            // MaxUses
-            var strGet = getValue.MakeGenericMethod(typeof(string));
-            var maxUsesStr = strGet.Invoke(null, new object[] { RefreshShopMod.ModId, KeyMaxUses }) as string;
-            if (!string.IsNullOrEmpty(maxUsesStr))
+            var path = SettingsPath;
+            if (!File.Exists(path))
             {
-                int parsed = ClampInt(maxUsesStr, 0, 999);
-                if (parsed != MaxUses)
-                {
-                    MaxUses = parsed;
-                    RefreshShopLog.Info($"Refreshed MaxUses={MaxUses} from ModConfig.");
-                }
+                RefreshShopLog.Info($"Settings not found, using defaults. Path={path}");
+                return;
             }
 
-            var costStr = strGet.Invoke(null, new object[] { RefreshShopMod.ModId, KeyCost }) as string;
-            if (!string.IsNullOrEmpty(costStr))
+            var json = File.ReadAllText(path);
+            var dto = JsonSerializer.Deserialize<SettingsDto>(json);
+            if (dto == null) return;
+
+            if (dto.MaxUses.HasValue)
             {
-                int parsed = ClampInt(costStr, 0, 999);
-                if (parsed != Cost)
-                {
-                    Cost = parsed;
-                    RefreshShopLog.Info($"Refreshed Cost={Cost} from ModConfig.");
-                }
+                MaxUses = ClampInt(dto.MaxUses.Value.ToString(), 0, 999);
+                _hasMaxUses = true;
             }
 
-            // RefillsPurchased
-            var boolGet = getValue.MakeGenericMethod(typeof(bool));
-            var refillVal = boolGet.Invoke(null, new object[] { RefreshShopMod.ModId, KeyRefillsPurchased });
-            if (refillVal is bool b && b != RefillsPurchased)
+            if (dto.Cost.HasValue)
             {
-                RefillsPurchased = b;
-                RefreshShopLog.Info($"Refreshed RefillsPurchased={RefillsPurchased} from ModConfig.");
+                Cost = ClampInt(dto.Cost.Value.ToString(), 0, 999);
+                _hasCost = true;
             }
+
+            if (dto.RefillsPurchased.HasValue)
+            {
+                RefillsPurchased = dto.RefillsPurchased.Value;
+                _hasRefillsPurchased = true;
+            }
+
+            RefreshShopLog.Info(
+                $"Settings loaded: maxUses={MaxUses}, cost={Cost}, refill={RefillsPurchased}. Path={path}");
         }
         catch (Exception ex)
         {
-            RefreshShopLog.Warn($"RefreshFromModConfig failed: {ex.Message}");
+            RefreshShopLog.Error($"LoadFromDisk failed: {ex.Message}");
+        }
+    }
+
+    /// <summary>串行写入完整临时文件，再替换目标；失败时保留原配置。</summary>
+    public static void SaveToDisk()
+    {
+        lock (_gate)
+        {
+            try
+            {
+                var path = SettingsPath;
+                Directory.CreateDirectory(Path.GetDirectoryName(path));
+                var dto = new SettingsDto
+                {
+                    // 尚未迁移的键保持缺失，不能把默认值误标为用户配置。
+                    MaxUses = _hasMaxUses ? MaxUses : null,
+                    Cost = _hasCost ? Cost : null,
+                    RefillsPurchased = _hasRefillsPurchased ? RefillsPurchased : null,
+                };
+                var json = JsonSerializer.Serialize(dto, new JsonSerializerOptions
+                {
+                    WriteIndented = true,
+                    DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+                });
+                var tmp = path + ".tmp";
+                File.WriteAllText(tmp, json);
+                File.Move(tmp, path, overwrite: true);
+                RefreshShopLog.Info($"Settings saved: maxUses={MaxUses}, cost={Cost}, refill={RefillsPurchased}.");
+            }
+            catch (Exception ex)
+            {
+                RefreshShopLog.Error($"SaveToDisk failed: {ex.Message}");
+            }
+        }
+    }
+
+    private sealed class SettingsDto
+    {
+        [JsonPropertyName("schema_version")]
+        public int SchemaVersion { get; set; } = 1;
+
+        [JsonPropertyName("refresh_max_uses")]
+        public int? MaxUses { get; set; }
+
+        [JsonPropertyName("refresh_cost")]
+        public int? Cost { get; set; }
+
+        [JsonPropertyName("refresh_refills_purchased")]
+        public bool? RefillsPurchased { get; set; }
+    }
+
+    /// <summary>
+    /// 该键是否还应该从 ModConfig 读取。
+    ///
+    /// 本 mod 的 JSON 一旦接管某个键，就不再从 ModConfig 取值：
+    /// ModConfig 是可选的老式第三方通道，其存量值可能是陈旧默认值，
+    /// 若在每次进商店时轮询覆盖，会把玩家在 RitsuLib 设置页改的值改回去。
+    /// 因此 ModConfig 只作为首次运行（本 mod 尚无 JSON）的迁移来源。
+    /// </summary>
+    private static bool ShouldImportFromModConfig(string key)
+    {
+        return key switch
+        {
+            KeyMaxUses => !_hasMaxUses,
+            KeyCost => !_hasCost,
+            KeyRefillsPurchased => !_hasRefillsPurchased,
+            _ => true,
+        };
+    }
+
+    internal static void SetMaxUsesFromRitsuLib(int value) => SetValue(KeyMaxUses, value, sync: true);
+    internal static void SetCostFromRitsuLib(int value) => SetValue(KeyCost, value, sync: true);
+    internal static void SetRefillsPurchasedFromRitsuLib(bool value) => SetValue(KeyRefillsPurchased, value, sync: true);
+
+    private static void SetValue(string key, object value, bool sync)
+    {
+        lock (_gate)
+        {
+            // Register/SetValue 可能同步回调；不能让初始化旧值覆盖 JSON，也不能递归保存。
+            if (_registeringModConfig || _syncingModConfig) return;
+            object normalized;
+            switch (key)
+            {
+                case KeyMaxUses:
+                    if (!int.TryParse(value?.ToString(), out var maxUses)) return;
+                    MaxUses = Math.Clamp(maxUses, 0, 999);
+                    _hasMaxUses = true;
+                    RefreshCounter.ResetForNewShop();
+                    normalized = MaxUses.ToString();
+                    break;
+                case KeyCost:
+                    if (!int.TryParse(value?.ToString(), out var cost)) return;
+                    Cost = Math.Clamp(cost, 0, 999);
+                    _hasCost = true;
+                    normalized = Cost.ToString();
+                    break;
+                case KeyRefillsPurchased:
+                    if (!bool.TryParse(value?.ToString(), out var refill)) return;
+                    RefillsPurchased = refill;
+                    _hasRefillsPurchased = true;
+                    normalized = refill;
+                    break;
+                default:
+                    return;
+            }
+            // 不依赖设置 UI 的防抖保存；即使马上退出也已落盘。
+            SaveToDisk();
+            if (sync && _modConfigReady) TrySetModConfigValue(key, normalized);
+        }
+    }
+
+    /// <summary>注册完成后批量迁移缺失的键，再一次性保存；已接管的键永不轮询覆盖。</summary>
+    public static void RefreshFromModConfig()
+    {
+        lock (_gate)
+        {
+            // ModConfig.Register 才会加载旧文件；注册前 GetValue 可能只是默认值。
+            if (!_modConfigReady) return;
+            var apiType = FindType("ModConfig.ModConfigApi");
+            if (apiType == null) return;
+            bool imported = false;
+            if (ShouldImportFromModConfig(KeyMaxUses))
+                TryReadExistingString(apiType, KeyMaxUses, value =>
+                {
+                    if (!int.TryParse(value, out var parsed)) return;
+                    MaxUses = Math.Clamp(parsed, 0, 999);
+                    _hasMaxUses = true;
+                    imported = true;
+                    RefreshCounter.ResetForNewShop();
+                });
+            if (ShouldImportFromModConfig(KeyCost))
+                TryReadExistingString(apiType, KeyCost, value =>
+                {
+                    if (!int.TryParse(value, out var parsed)) return;
+                    Cost = Math.Clamp(parsed, 0, 999);
+                    _hasCost = true;
+                    imported = true;
+                });
+            if (ShouldImportFromModConfig(KeyRefillsPurchased))
+                TryReadExistingBool(apiType, KeyRefillsPurchased, value =>
+                {
+                    RefillsPurchased = value;
+                    _hasRefillsPurchased = true;
+                    imported = true;
+                });
+            if (imported) SaveToDisk();
         }
     }
 
@@ -131,27 +293,23 @@ internal static class RefreshShopConfig
             return;
         }
 
-        var maxUsesEntry = BuildTextInputEntry(entryType, typeEnum, apiType,
+        var maxUsesEntry = BuildTextInputEntry(entryType, typeEnum,
             KeyMaxUses,
             labelEn: "Max Refreshes (0=Infinite)",
             labelZhs: "刷新次数 (0=无限)",
             descEn: "Number of refreshes available per shop visit. 0 = unlimited.",
             descZhs: "每次进入商店的可用刷新次数。0 = 无限次。",
-            defaultValue: DefaultMaxUses.ToString(),
-            applyExisting: v => MaxUses = v,
-            parse: s => ClampInt(s, 0, 999));
+            defaultValue: DefaultMaxUses.ToString());
 
-        var costEntry = BuildTextInputEntry(entryType, typeEnum, apiType,
+        var costEntry = BuildTextInputEntry(entryType, typeEnum,
             KeyCost,
             labelEn: "Refresh Cost",
             labelZhs: "刷新价格",
             descEn: "Gold cost per refresh. 0 = free.",
             descZhs: "每次刷新消耗的金币。0 = 免费。",
-            defaultValue: DefaultCost.ToString(),
-            applyExisting: v => Cost = v,
-            parse: s => ClampInt(s, 0, 999));
+            defaultValue: DefaultCost.ToString());
 
-        var refillEntry = BuildToggleEntry(entryType, typeEnum, apiType,
+        var refillEntry = BuildToggleEntry(entryType, typeEnum,
             KeyRefillsPurchased,
             labelEn: "Refill Purchased Slots",
             labelZhs: "刷新时恢复已购槽位",
@@ -173,28 +331,38 @@ internal static class RefreshShopConfig
         var registerLocalized = apiType.GetMethod(
             "Register",
             new[] { typeof(string), typeof(string), typeof(Dictionary<string, string>), entries.GetType() });
-        if (registerLocalized != null)
-        {
-            registerLocalized.Invoke(null, new object[] { RefreshShopMod.ModId, "Shop Refresh", displayNames, entries });
-            RefreshShopLog.Info($"Registered config to ModConfig with i18n displayNames (maxUses={MaxUses}, cost={Cost}, refill={RefillsPurchased}).");
-            return;
-        }
-
-        var register = apiType.GetMethod("Register", new[] { typeof(string), typeof(string), entries.GetType() });
+        var register = registerLocalized ?? apiType.GetMethod(
+            "Register", new[] { typeof(string), typeof(string), entries.GetType() });
         if (register == null)
         {
             RefreshShopLog.Warn("ModConfigApi.Register not found.");
             return;
         }
-        register.Invoke(null, new object[] { RefreshShopMod.ModId, "Shop Refresh", entries });
-        RefreshShopLog.Info($"Registered config to ModConfig (maxUses={MaxUses}, cost={Cost}, refill={RefillsPurchased}).");
+        _registeringModConfig = true;
+        try
+        {
+            register.Invoke(null, registerLocalized != null
+                ? new object[] { RefreshShopMod.ModId, "Shop Refresh", displayNames, entries }
+                : new object[] { RefreshShopMod.ModId, "Shop Refresh", entries });
+            _modConfigReady = true;
+        }
+        finally
+        {
+            _registeringModConfig = false;
+        }
+        RefreshFromModConfig();
+        // 旧设置页也显示 JSON 中的当前值，用户随后在任一设置页修改都即时保存。
+        if (_hasMaxUses) TrySetModConfigValue(KeyMaxUses, MaxUses.ToString());
+        if (_hasCost) TrySetModConfigValue(KeyCost, Cost.ToString());
+        if (_hasRefillsPurchased) TrySetModConfigValue(KeyRefillsPurchased, RefillsPurchased);
+        RefreshShopLog.Info($"Registered config (maxUses={MaxUses}, cost={Cost}, refill={RefillsPurchased}).");
     }
 
     private static object BuildTextInputEntry(
-        Type entryType, Type typeEnum, Type apiType,
+        Type entryType, Type typeEnum,
         string key, string labelEn, string labelZhs,
         string descEn, string descZhs,
-        string defaultValue, Action<int> applyExisting, Func<string, int> parse)
+        string defaultValue)
     {
         var entry = Activator.CreateInstance(entryType);
         SetProp(entry, "Key", key);
@@ -214,28 +382,13 @@ internal static class RefreshShopConfig
         SetProp(entry, "DefaultValue", defaultValue);
         SetProp(entry, "MaxLength", 3);
 
-        Action<object> onChanged = v =>
-        {
-            int parsed = parse(v?.ToString() ?? "");
-            if (key == KeyMaxUses) { MaxUses = parsed; RefreshCounter.ResetForNewShop(); }
-            else if (key == KeyCost) Cost = parsed;
-            RefreshShopLog.Info($"Config {key} changed → {parsed}.");
-        };
-        SetProp(entry, "OnChanged", onChanged);
-
-        // 注册前读一次已存在的值（用 string 泛型）
-        TryReadExistingString(apiType, key, s =>
-        {
-            int parsed = parse(s);
-            applyExisting(parsed);
-            RefreshShopLog.Info($"Read existing {key}={parsed} from ModConfig.");
-        });
+        SetProp(entry, "OnChanged", new Action<object>(value => SetValue(key, value, sync: false)));
 
         return entry;
     }
 
     private static object BuildToggleEntry(
-        Type entryType, Type typeEnum, Type apiType,
+        Type entryType, Type typeEnum,
         string key, string labelEn, string labelZhs,
         string descEn, string descZhs,
         bool defaultValue)
@@ -257,18 +410,7 @@ internal static class RefreshShopConfig
         SetProp(entry, "Type", Enum.Parse(typeEnum, "Toggle"));
         SetProp(entry, "DefaultValue", defaultValue);
 
-        Action<object> onChanged = v =>
-        {
-            RefillsPurchased = Convert.ToBoolean(v);
-            RefreshShopLog.Info($"Config {key} changed → {RefillsPurchased}.");
-        };
-        SetProp(entry, "OnChanged", onChanged);
-
-        TryReadExistingBool(apiType, key, b =>
-        {
-            RefillsPurchased = b;
-            RefreshShopLog.Info($"Read existing {key}={b} from ModConfig.");
-        });
+        SetProp(entry, "OnChanged", new Action<object>(value => SetValue(key, value, sync: false)));
 
         return entry;
     }
@@ -325,7 +467,15 @@ internal static class RefreshShopConfig
         {
             var apiType = FindType("ModConfig.ModConfigApi");
             var setValue = apiType?.GetMethod("SetValue", BindingFlags.Public | BindingFlags.Static);
-            setValue?.Invoke(null, new object[] { RefreshShopMod.ModId, key, value });
+            _syncingModConfig = true;
+            try
+            {
+                setValue?.Invoke(null, new object[] { RefreshShopMod.ModId, key, value });
+            }
+            finally
+            {
+                _syncingModConfig = false;
+            }
         }
         catch (Exception ex)
         {
