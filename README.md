@@ -1,6 +1,8 @@
 # RefreshShop
 
-《杀戮尖塔 2》商店刷新 Mod。当前版本：**0.3.0**。[Steam 创意工坊](https://steamcommunity.com/sharedfiles/filedetails/?id=3747499124)
+《杀戮尖塔 2》商店刷新 Mod。当前版本：**0.3.1**。[Steam 创意工坊](https://steamcommunity.com/sharedfiles/filedetails/?id=3747499124)
+
+0.3.1 修复了某个遗物槽没有合法候选时点击刷新无反应的问题。现在会保留该槽并刷新其余商品，也恢复了已注册共享池中符合条件的 Mod 遗物。
 
 在删卡服务下方增加原生按钮，刷新本地玩家的卡牌、遗物、药水商品。删卡服务保持原样。
 

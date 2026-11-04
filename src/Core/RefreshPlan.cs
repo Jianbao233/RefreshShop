@@ -70,10 +70,15 @@ internal sealed class RefreshPlan
         var sharedType = GameApi.Type("Models.RelicPools.SharedRelicPool");
         var shared = db.GetMethod("RelicPool").MakeGenericMethod(sharedType).Invoke(null, null);
         var unlocks = GameApi.Get(player, "UnlockState");
-        var pool = GameApi.Items(GameApi.Call(characterPool, "GetUnlockedRelics", unlocks))
-            .Concat(GameApi.Items(GameApi.Call(shared, "GetUnlockedRelics", unlocks)))
+        var characterPools = GameApi.Items(GameApi.Get(db, "CharacterRelicPools")).ToHashSet();
+        // Content frameworks can append standalone shared pools to AllRelicPools.
+        // Exclude other characters and vanilla special-purpose pools (ancients, events, etc.).
+        var modSharedPools = GameApi.Items(GameApi.Get(db, "AllRelicPools"))
+            .Where(p => p.GetType().Assembly != db.Assembly && !characterPools.Contains(p));
+        var pool = new[] { characterPool, shared }.Concat(modSharedPools).Distinct()
+            .SelectMany(p => GameApi.Items(GameApi.Call(p, "GetUnlockedRelics", unlocks)))
             .Where(r => (bool)GameApi.Get(r, "IsAllowedInShops") && (bool)GameApi.Call(r, "IsAllowed", _runState)
-                && !BlacklistBridge.IsBanned("Relic", r)).Distinct().ToArray();
+                && !BlacklistBridge.IsBanned("Relic", r)).DistinctBy(GameApi.Id).ToArray();
         var used = GameApi.Items(GameApi.Get(player, "Relics")).Select(GameApi.Id).ToHashSet();
         var originals = GameApi.Items(GameApi.Get(inventory, "RelicEntries"));
         var copies = GameApi.Items(GameApi.Get(shadow, "RelicEntries"));
@@ -87,8 +92,16 @@ internal sealed class RefreshPlan
             var shopSlot = i == 2 || (oldModel != null && GameApi.Get(oldModel, "Rarity").ToString() == "Shop");
             var rarity = shopSlot ? Enum.Parse(rarityType, "Shop")
                 : GameApi.Call(GameApi.Type("Factories.RelicFactory"), "RollRarity", rng);
-            var candidates = pool.Where(r => !used.Contains(GameApi.Id(r)) && GameApi.Get(r, "Rarity").Equals(rarity)).ToArray();
-            if (candidates.Length == 0) throw new InvalidOperationException("No allowed relics for slot rarity " + rarity);
+            // Later slots may keep their existing relic if their own rarity has no candidates.
+            var reserved = copies.Skip(i + 1).Select(e => GameApi.Get(e, "Model"))
+                .Where(r => r != null).Select(GameApi.Id).ToHashSet();
+            var candidates = pool.Where(r => !used.Contains(GameApi.Id(r)) && !reserved.Contains(GameApi.Id(r))
+                && GameApi.Get(r, "Rarity").Equals(rarity)).ToArray();
+            if (candidates.Length == 0)
+            {
+                if (oldModel != null) used.Add(GameApi.Id(oldModel));
+                continue;
+            }
             var chosen = candidates[(int)GameApi.Call(rng, "NextInt", candidates.Length)];
             used.Add(GameApi.Id(chosen));
             GameApi.Set(entry, "Model", GameApi.Call(chosen, "ToMutable"));

@@ -16,6 +16,7 @@ public partial class RefreshShopButton : Control
     private EventInfo _goldEvent;
     private Action _goldChanged;
     private bool _running;
+    private bool _refreshFailed;
 
     public override void _Ready()
     {
@@ -64,13 +65,17 @@ public partial class RefreshShopButton : Control
         if (_inventory == null || !IsInsideTree()) return;
         RefreshCounter.Bind(_inventory);
         var uses = RefreshCounter.IsInfinite ? "∞" : $"{RefreshCounter.RemainingUses}/{RefreshShopConfig.MaxUses}";
-        _label.Text = $"{(Chinese ? "刷新" : "Refresh")} {uses} · {RefreshShopConfig.Cost} {(Chinese ? "金" : "G")}";
+        var action = _refreshFailed ? (Chinese ? "刷新失败" : "Refresh failed") : (Chinese ? "刷新" : "Refresh");
+        _label.Text = $"{action} {uses} · {RefreshShopConfig.Cost} {(Chinese ? "金" : "G")}";
         var blocked = (bool)GameApi.Read(_inventoryNode, "_isInputBlocked");
         var enabled = !_running && !blocked && RefreshCounter.CanRefresh()
             && ShopRefreshService.IsAvailable(_inventory) && GameApi.Gold(_player) >= RefreshShopConfig.Cost;
         GameApi.Call(NativeButton, "SetEnabled", enabled);
         NativeButton.TooltipText = !ShopRefreshService.IsAvailable(_inventory)
             ? (Chinese ? "金币同步失败，请重新连接。" : "Gold sync failed. Please reconnect.")
+            : !RefreshCounter.CanRefresh() ? (Chinese ? "本商店的刷新次数已用完。" : "No refreshes left in this shop.")
+            : GameApi.Gold(_player) < RefreshShopConfig.Cost ? (Chinese ? "金币不足。" : "Not enough gold.")
+            : _refreshFailed ? (Chinese ? "刷新未完成，详情见游戏日志。" : "Refresh did not complete. See the game log.")
             : (Chinese ? "刷新自己的商店商品；删卡服务保持不变。" : "Refresh your shop items. Card removal is unchanged.");
     }
 
@@ -96,14 +101,19 @@ public partial class RefreshShopButton : Control
         if (_running || _inventory == null || !(bool)GameApi.Get(_inventoryNode, "IsOpen")
             || (bool)GameApi.Read(_inventoryNode, "_isInputBlocked")) return;
         _running = true;
+        _refreshFailed = false;
         try
         {
             GameApi.Call(_inventoryNode, "BlockInput");
             UpdateDisplay();
-            await ShopRefreshService.RefreshAsync(_inventory);
-            if (GodotObject.IsInstanceValid(_inventoryNode)) RefreshVisuals(_inventoryNode);
+            _refreshFailed = !await ShopRefreshService.RefreshAsync(_inventory);
+            if (!_refreshFailed && GodotObject.IsInstanceValid(_inventoryNode)) RefreshVisuals(_inventoryNode);
         }
-        catch (Exception ex) { RefreshShopLog.Error("Refresh UI: " + ex.GetBaseException().Message); }
+        catch (Exception ex)
+        {
+            _refreshFailed = true;
+            RefreshShopLog.Error("Refresh UI: " + ex.GetBaseException().Message);
+        }
         finally
         {
             _running = false;

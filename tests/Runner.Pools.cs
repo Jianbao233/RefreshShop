@@ -1,5 +1,6 @@
 using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Entities.Merchant;
+using MegaCrit.Sts2.Core.Entities.Relics;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Models.Characters;
 using MegaCrit.Sts2.Core.Models.RelicPools;
@@ -32,6 +33,7 @@ public partial class Runner
             }
         }
         _passed.Add("all playable characters with none/all unlocks: 50 native refreshes");
+        RegisteredModRelicPool();
 
         var p = Player.CreateForNewRun<Ironclad>(UnlockState.all, 11);
         var state = RunState.CreateForTest(new[] { p }, seed: "BANREFRESH");
@@ -48,6 +50,79 @@ public partial class Runner
         finally { MerchantBlacklist.Core.BlacklistStore.BlockPotions = false; }
         _passed.Add("blacklist bridge rejects empty pools before committing");
     }
+
+    private void RegisteredModRelicPool()
+    {
+        foreach (var type in new[] { typeof(SharedFixtureRelicPool), typeof(ForeignFixtureRelicPool),
+            typeof(EligibleShopRelic), typeof(LockedShopRelic), typeof(DisallowedShopRelic), typeof(ForeignShopRelic) })
+            ModelDb.Inject(type);
+
+        var player = Player.CreateForNewRun<Ironclad>(UnlockState.all, 11);
+        var run = RunState.CreateForTest(new[] { player }, seed: "MODSHOP");
+        var inventory = MerchantInventory.CreateForNormalMerchant(player);
+        var rng = player.PlayerRng.ToSerializable();
+        var rngBefore = Rng(player);
+        var vanillaShopIds = ModelDb.RelicPool<SharedRelicPool>().AllRelics.Concat(player.Character.RelicPool.AllRelics)
+            .Where(relic => relic.Rarity == RelicRarity.Shop).Select(relic => relic.Id.Entry).ToHashSet();
+        var h = new HarmonyLib.Harmony("RefreshShop.Tests.RegisteredPools");
+        var all = typeof(ModelDb).GetProperty(nameof(ModelDb.AllRelicPools)).GetMethod;
+        var characters = typeof(ModelDb).GetProperty(nameof(ModelDb.CharacterRelicPools)).GetMethod;
+        try
+        {
+            h.Patch(all, postfix: new HarmonyLib.HarmonyMethod(typeof(Runner), nameof(AddSharedFixturePool)));
+            h.Patch(characters, postfix: new HarmonyLib.HarmonyMethod(typeof(Runner), nameof(AddForeignFixturePool)));
+            MerchantBlacklist.Core.BlacklistStore.BlockedRelics = vanillaShopIds;
+            var plan = RefreshPlan.Prepare(inventory, true, rng);
+            plan.Apply(); plan.Commit();
+            Check(inventory.RelicEntries[2].Model is EligibleShopRelic, "registered shared Mod relic reaches the Shop slot");
+            Check(Rng(player) == rngBefore, "custom relic refresh retains vanilla RNGs");
+
+            vanillaShopIds.Add(ModelDb.Relic<EligibleShopRelic>().Id.Entry);
+            var shopEntry = inventory.RelicEntries[2];
+            var before = shopEntry.Model;
+            var withoutCandidate = RefreshPlan.Prepare(inventory, true, rng);
+            Check(withoutCandidate.Changes.Count > 0 && withoutCandidate.Changes.All(c => c.Entry != shopEntry),
+                "an empty Shop candidate pool does not cancel other slots or admit ineligible relics");
+            withoutCandidate.Apply(); withoutCandidate.Commit();
+            Check(ReferenceEquals(shopEntry.Model, before), "a relic slot with no legal replacement is left as it was");
+        }
+        finally
+        {
+            h.Unpatch(all, HarmonyLib.HarmonyPatchType.Postfix, h.Id);
+            h.Unpatch(characters, HarmonyLib.HarmonyPatchType.Postfix, h.Id);
+            MerchantBlacklist.Core.BlacklistStore.BlockedRelics = new();
+        }
+        _passed.Add("registered shared Mod relics retain unlock/shop/character/blacklist restrictions");
+    }
+
+    private static void AddSharedFixturePool(ref IEnumerable<RelicPoolModel> __result) =>
+        __result = __result.Append(ModelDb.RelicPool<SharedFixtureRelicPool>());
+
+    private static void AddForeignFixturePool(ref IEnumerable<RelicPoolModel> __result) =>
+        __result = __result.Append(ModelDb.RelicPool<ForeignFixtureRelicPool>());
+}
+
+public sealed class SharedFixtureRelicPool : RelicPoolModel
+{
+    public override string EnergyColorName => "colorless";
+    protected override IEnumerable<RelicModel> GenerateAllRelics() =>
+        new RelicModel[] { ModelDb.Relic<EligibleShopRelic>(), ModelDb.Relic<LockedShopRelic>(), ModelDb.Relic<DisallowedShopRelic>() };
+    public override IEnumerable<RelicModel> GetUnlockedRelics(UnlockState unlockState) => AllRelics.Where(relic => relic is not LockedShopRelic);
+}
+
+public sealed class ForeignFixtureRelicPool : RelicPoolModel
+{
+    public override string EnergyColorName => "colorless";
+    protected override IEnumerable<RelicModel> GenerateAllRelics() => new[] { ModelDb.Relic<ForeignShopRelic>() };
+}
+
+public sealed class EligibleShopRelic : RelicModel { public override RelicRarity Rarity => RelicRarity.Shop; }
+public sealed class LockedShopRelic : RelicModel { public override RelicRarity Rarity => RelicRarity.Shop; }
+public sealed class ForeignShopRelic : RelicModel { public override RelicRarity Rarity => RelicRarity.Shop; }
+public sealed class DisallowedShopRelic : RelicModel
+{
+    public override RelicRarity Rarity => RelicRarity.Shop;
+    public override bool IsAllowedInShops => false;
 }
 
 // Optional external API fixture; no real player blacklist is read or changed.
@@ -56,7 +131,8 @@ namespace MerchantBlacklist.Core
     public static class BlacklistStore
     {
         public static bool BlockPotions;
-        public static bool IsRelicBanned(string id) => false;
+        public static HashSet<string> BlockedRelics = new();
+        public static bool IsRelicBanned(string id) => BlockedRelics.Contains(id);
         public static bool IsPotionBanned(string id) => BlockPotions;
         public static bool IsCardBanned(string id) => false;
     }

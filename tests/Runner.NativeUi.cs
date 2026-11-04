@@ -40,8 +40,10 @@ public partial class Runner
         RefreshShopConfig.SetMaxUsesFromRitsuLib(5);
         RefreshShopConfig.SetCostFromRitsuLib(0);
         var inv = MerchantInventory.CreateForNormalMerchant(p);
+        var viewport = new SubViewport { Size = new Vector2I(1920, 1080) };
+        AddChild(viewport);
         var shop = new TestShop { Inventory = inv, Size = new Vector2(1920,1080) };
-        AddChild(shop);
+        viewport.AddChild(shop);
         var slots = new Control { Position = new Vector2(300, 200), Size = new Vector2(800, 600) };
         shop.AddChild(slots);
         var removal = new TestSlot { Entry = inv.CardRemovalEntry, Position = new Vector2(400, 300), Size = new Vector2(240, 220), FocusMode = Control.FocusModeEnum.All };
@@ -65,10 +67,36 @@ public partial class Runner
             await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
             Check(RefreshCounter.RemainingUses == count - 1, "native select press/release performs one refresh");
             Check(net.Sent.Count == 0, "free refresh sends no packets");
+            if (i == 0)
+            {
+                var mouse = button.GetGlobalRect().GetCenter();
+                viewport.PushInput(new InputEventMouseMotion { Position = mouse, GlobalPosition = mouse }, true);
+                await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+                Check(viewport.GuiGetHoveredControl() == button, $"mouse hits native refresh button (rect={button.GetGlobalRect()}, hit={viewport.GuiGetHoveredControl()?.Name})");
+                void Click()
+                {
+                    foreach (var pressed in new[] { true, false })
+                        viewport.PushInput(new InputEventMouseButton { ButtonIndex = MouseButton.Left,
+                            Pressed = pressed, Position = mouse, GlobalPosition = mouse }, true);
+                }
+                Click();
+                await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+                Check(RefreshCounter.RemainingUses == count - 2, "mouse click performs one refresh");
+
+                MerchantBlacklist.Core.BlacklistStore.BlockPotions = true;
+                try
+                {
+                    Click();
+                    await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+                    Check(button.GetNode<Label>("Label").Text.StartsWith("Refresh failed"), "failed mouse refresh gives visible feedback");
+                    Check(RefreshCounter.RemainingUses == count - 2 && !shop._isInputBlocked, "failed click preserves uses and unlocks shop input");
+                }
+                finally { MerchantBlacklist.Core.BlacklistStore.BlockPotions = false; }
+            }
             slots.RemoveChild(wrapper); wrapper.Free();
             Check(Subscribers() == subscriptions, "gold handler removed on close");
         }
-        shop.QueueFree();
+        viewport.QueueFree();
         await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
         harmony.UnpatchAll(harmony.Id);
         _passed.Add("native button: controller action, focus, animated parent, free refresh, three open/close cycles");
