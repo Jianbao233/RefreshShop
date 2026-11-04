@@ -4,13 +4,9 @@ New-Item -ItemType Directory -Path $testRoot | Out-Null
 $utf8 = New-Object System.Text.UTF8Encoding($false)
 function Write-TestFile($name, $text) { [IO.File]::WriteAllText((Join-Path $testRoot $name), $text, $utf8) }
 
-# Compile the production config/provider/counter with only the filesystem root redirected.
+# Compile unchanged production sources; use the supported configuration-root override.
 # Godot logging and the optional ModConfig API are replaced by small behavioral test doubles.
-$config = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'src/Core/RefreshShopConfig.cs'))
-$pathExpression = 'Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData)'
-if (-not $config.Contains($pathExpression)) { throw 'Settings path seam changed; review test isolation.' }
-Write-TestFile 'RefreshShopConfig.cs' $config.Replace($pathExpression, 'Environment.GetEnvironmentVariable("REFRESHSHOP_TEST_APPDATA")')
-foreach ($name in @('RitsuLibSettingsProvider.cs', 'RefreshCounter.cs')) {
+foreach ($name in @('SettingsStore.cs', 'RefreshShopConfig.cs', 'ModConfigSettingsAdapter.cs', 'RitsuLibSettingsProvider.cs', 'RefreshCounter.cs')) {
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot "src/Core/$name") -Destination (Join-Path $testRoot $name)
 }
 Write-TestFile 'ConfigTests.csproj' @'
@@ -26,7 +22,7 @@ Write-TestFile 'Program.cs' @'
 using System.Text.Json;
 using RefreshShop;
 var mode = args[0];
-var root = Environment.GetEnvironmentVariable("REFRESHSHOP_TEST_APPDATA");
+var root = Environment.GetEnvironmentVariable("SLAY_THE_SPIRE2_APPDATA");
 if (string.IsNullOrEmpty(root) || !root.Contains("RefreshShopConfigTests-")) throw new Exception("Unsafe test path");
 var path = Path.Combine(root, "SlayTheSpire2", "mods_settings", "RefreshShop.json");
 void Seed(string json) { Directory.CreateDirectory(Path.GetDirectoryName(path)); File.WriteAllText(path, json); }
@@ -126,7 +122,7 @@ namespace ModConfig {
 dotnet build (Join-Path $testRoot 'ConfigTests.csproj') --nologo -v:q
 if ($LASTEXITCODE -ne 0) { throw 'Configuration test build failed' }
 $dll = Join-Path $testRoot 'bin/Debug/net8.0/ConfigTests.dll'
-$oldRoot = $env:REFRESHSHOP_TEST_APPDATA
+$oldRoot = $env:SLAY_THE_SPIRE2_APPDATA
 $cases = @(
     @('defaults','defaults'), @('roundtrip','write'), @('roundtrip','read'), @('roundtrip','protect'),
     @('migration','migrate'), @('migration','read'), @('partial','partial'), @('partial','partial-read'),
@@ -136,9 +132,9 @@ $cases = @(
 )
 try {
     foreach ($case in $cases) {
-        $env:REFRESHSHOP_TEST_APPDATA = Join-Path $testRoot $case[0]
+        $env:SLAY_THE_SPIRE2_APPDATA = Join-Path $testRoot $case[0]
         dotnet $dll $case[1]
         if ($LASTEXITCODE -ne 0) { throw "Failed: $($case[1]); evidence: $testRoot" }
     }
-} finally { $env:REFRESHSHOP_TEST_APPDATA = $oldRoot }
+} finally { $env:SLAY_THE_SPIRE2_APPDATA = $oldRoot }
 Write-Host "All $($cases.Count) configuration checks passed. Evidence: $testRoot"

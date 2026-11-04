@@ -1,0 +1,10 @@
+config_version=5
+[application]
+config/name="RefreshShopNetworkTests"
+run/main_scene="res://NativePeer.tscn"
+config/use_custom_user_dir=true
+config/custom_user_dir_name="RefreshShopNetworkTests"
+[dotnet]
+project/assembly_name="RefreshShop.NetworkTests"
+[rendering]
+renderer/rendering_method="gl_compatibility"

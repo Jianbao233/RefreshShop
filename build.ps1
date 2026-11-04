@@ -1,61 +1,56 @@
 param(
-    [ValidateSet("Debug", "Release")]
-    [string]$Configuration = "Release"
+    [ValidateSet('Debug', 'Release')][string]$Configuration = 'Release',
+    [string]$GameDir = $env:STS2_GAME_DIR,
+    [switch]$Stage,
+    [switch]$Deploy,
+    [switch]$Archive
 )
-
-$ErrorActionPreference = "Stop"
-$ProjectRoot = $PSScriptRoot
-$ModId = "RefreshShop"
-$GameModsDir = "F:\Steam\steamapps\common\Slay the Spire 2\mods\$ModId"
-$GameModsDirAlt = "C:\Users\Jianbao\AppData\Roaming\SlayTheSpire2\mods\$ModId"
-
-Write-Host "=== RefreshShop Mod Build ===" -ForegroundColor Cyan
-Write-Host "Project: $ProjectRoot"
-
-Write-Host "[1/3] dotnet build..." -ForegroundColor Yellow
-dotnet build (Join-Path $ProjectRoot "RefreshShop.csproj") -c $Configuration --nologo -v q
-if ($LASTEXITCODE -ne 0) { throw "dotnet build failed" }
-
-Write-Host "[2/3] Copy to mods directory..." -ForegroundColor Yellow
-if (Test-Path $GameModsDir) {
-    $TargetDir = $GameModsDir
+$ErrorActionPreference = 'Stop'
+$root = $PSScriptRoot
+$manifestPath = Join-Path $root 'mod_manifest.json'
+$manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+dotnet build (Join-Path $root 'RefreshShop.csproj') -c $Configuration --nologo -v:q
+if ($LASTEXITCODE -ne 0) { throw 'Build failed' }
+$dll = Join-Path $root ".godot\mono\temp\bin\$Configuration\RefreshShop.dll"
+$numericVersion = $manifest.version.Split('-')[0] + '.0'
+if ([Reflection.AssemblyName]::GetAssemblyName($dll).Version.ToString() -ne $numericVersion) { throw 'DLL / manifest version mismatch' }
+if (!(Test-Path -LiteralPath (Join-Path $root 'release'))) { New-Item -ItemType Directory -Path (Join-Path $root 'release') | Out-Null }
+if ($Stage -or $Deploy -or $Archive) {
+    $staging = Join-Path $root 'torelease'
+    New-Item -ItemType Directory -Path $staging -Force | Out-Null
+    Copy-Item -LiteralPath $dll -Destination (Join-Path $staging 'RefreshShop.dll') -Force
+    Copy-Item -LiteralPath $manifestPath -Destination (Join-Path $staging 'mod_manifest.json') -Force
+    $extra = Get-ChildItem -LiteralPath $staging -Force | Where-Object Name -notin @('RefreshShop.dll','mod_manifest.json')
+    if ($extra) { throw 'Unexpected files in staging; review before packaging.' }
 }
-elseif (Test-Path $GameModsDirAlt) {
-    $TargetDir = $GameModsDirAlt
+if ($Deploy) {
+    if (!$GameDir) {
+        $GameDir = @('F:\Steam\steamapps\common\Slay the Spire 2', 'C:\Program Files (x86)\Steam\steamapps\common\Slay the Spire 2') |
+            Where-Object { Test-Path -LiteralPath (Join-Path $_ 'SlayTheSpire2.exe') } | Select-Object -First 1
+    }
+    if (!$GameDir -or !(Test-Path -LiteralPath (Join-Path $GameDir 'SlayTheSpire2.exe'))) { throw 'Provide -GameDir or STS2_GAME_DIR.' }
+    if (Get-Process -Name SlayTheSpire2 -ErrorAction SilentlyContinue) { throw 'Exit the game before deploying.' }
+    $target = Join-Path $GameDir 'mods\RefreshShop'
+    if (Test-Path -LiteralPath $target) {
+        $backup = Join-Path $root ('release\deploy-backups\' + (Get-Date -Format 'yyyyMMdd-HHmmssfff'))
+        New-Item -ItemType Directory -Path $backup -Force | Out-Null
+        Get-ChildItem -LiteralPath $target -File | Copy-Item -Destination $backup
+        Write-Host "Deployment backup: $backup"
+    }
+    New-Item -ItemType Directory -Path $target -Force | Out-Null
+    foreach ($name in @('RefreshShop.dll','mod_manifest.json')) {
+        $source = Join-Path $staging $name
+        $destination = Join-Path $target $name
+        Copy-Item -LiteralPath $source -Destination ($destination + '.pending') -Force
+        Move-Item -LiteralPath ($destination + '.pending') -Destination $destination -Force
+        if ((Get-FileHash -LiteralPath $source).Hash -ne (Get-FileHash -LiteralPath $destination).Hash) { throw "Deployment hash mismatch: $name" }
+    }
+    Write-Host "Local deployment: $target"
 }
-elseif (Test-Path "F:\Steam\steamapps\common\Slay the Spire 2\mods") {
-    $TargetDir = $GameModsDir
-    New-Item -ItemType Directory -Force -Path $TargetDir | Out-Null
+if ($Archive) {
+    $archivePath = Join-Path $root ('release\RefreshShop_v' + $manifest.version + '.zip')
+    if (Test-Path -LiteralPath $archivePath) { throw "Archive exists; preserve it: $archivePath" }
+    Compress-Archive -LiteralPath (Join-Path $staging 'RefreshShop.dll'),(Join-Path $staging 'mod_manifest.json') -DestinationPath $archivePath
+    Write-Host "Local archive: $archivePath"
 }
-else {
-    $TargetDir = $GameModsDirAlt
-    New-Item -ItemType Directory -Force -Path $TargetDir | Out-Null
-}
-
-Write-Host "  Target: $TargetDir"
-$DllPath = Join-Path $ProjectRoot ".godot\mono\temp\bin\$Configuration\RefreshShop.dll"
-if (Test-Path $DllPath) {
-    Copy-Item -Path $DllPath -Destination (Join-Path $TargetDir "RefreshShop.dll") -Force
-    Write-Host "  Copied RefreshShop.dll OK" -ForegroundColor Green
-}
-else {
-    throw "Build output missing: $DllPath"
-}
-
-if (Test-Path (Join-Path $ProjectRoot "mod_manifest.json")) {
-    Copy-Item -Path (Join-Path $ProjectRoot "mod_manifest.json") -Destination (Join-Path $TargetDir "mod_manifest.json") -Force
-    Write-Host "  Copied mod_manifest.json OK" -ForegroundColor Green
-}
-
-$ToReleaseDir = Join-Path $ProjectRoot "torelease"
-New-Item -ItemType Directory -Force -Path $ToReleaseDir | Out-Null
-if (Test-Path $DllPath) {
-    Copy-Item -Path $DllPath -Destination (Join-Path $ToReleaseDir "RefreshShop.dll") -Force
-}
-if (Test-Path (Join-Path $ProjectRoot "mod_manifest.json")) {
-    Copy-Item -Path (Join-Path $ProjectRoot "mod_manifest.json") -Destination (Join-Path $ToReleaseDir "mod_manifest.json") -Force
-}
-
-Write-Host "[3/3] Done. Target: $TargetDir" -ForegroundColor Green
-Write-Host "         Also snapshot -> $ToReleaseDir"
-Write-Host "Build complete. Please test in game." -ForegroundColor Yellow
+Write-Host "Built $($manifest.version). Stage=$Stage Deploy=$Deploy Archive=$Archive"

@@ -4,11 +4,12 @@
     <EnableDynamicLoading>true</EnableDynamicLoading>
     <RootNamespace>RefreshShop</RootNamespace>
     <AssemblyName>RefreshShop</AssemblyName>
-    <Version>0.2.3</Version>
-    <FileVersion>0.2.3</FileVersion>
-    <AssemblyVersion>0.2.3</AssemblyVersion>
+    <!-- The manifest is the version source for DLL, staging and local archives. -->
+    <Version>$([System.Text.RegularExpressions.Regex]::Match($([System.IO.File]::ReadAllText('$(MSBuildProjectDirectory)/mod_manifest.json')), '(?&lt;=&quot;version&quot;: &quot;)[^&quot;]+').Value)</Version>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Remove="tests/**/*.cs" />
+    <InternalsVisibleTo Include="RefreshShop.Tests" />
     <PackageReference Include="Lib.Harmony" Version="2.3.3" />
   </ItemGroup>
   <ItemGroup>

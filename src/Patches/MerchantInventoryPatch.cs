@@ -22,3 +22,23 @@ internal static class MerchantInventoryInitializePatch
         RefreshShopButtonInjector.TryInject(__instance);
     }
 }
+
+// Native navigation is rebuilt after purchases. Reconnect our additional button then.
+[HarmonyPatch]
+internal static class MerchantNavigationPatch
+{
+    static MethodBase TargetMethod() => GameApi.Method(GameApi.Type("Nodes.Screens.Shops.NMerchantInventory"), "UpdateNavigation");
+    static void Postfix(Godot.Control __instance) => RefreshShopButtonInjector.Find(__instance)?.UpdateNavigation();
+}
+
+[HarmonyPatch]
+internal static class MerchantInputPatch
+{
+    static System.Collections.Generic.IEnumerable<MethodBase> TargetMethods()
+    {
+        var type = GameApi.Type("Nodes.Screens.Shops.NMerchantInventory");
+        yield return GameApi.Method(type, "BlockInput");
+        yield return GameApi.Method(type, "UnblockInput");
+    }
+    static void Postfix(Godot.Control __instance) => RefreshShopButtonInjector.Find(__instance)?.UpdateDisplay();
+}

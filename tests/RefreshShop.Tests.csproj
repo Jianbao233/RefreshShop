@@ -1,0 +1,17 @@
+<Project Sdk="Godot.NET.Sdk/4.5.1">
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <NoWarn>$(NoWarn);CS0436;CA2255</NoWarn>
+    <DefineConstants Condition="'$(LegacyApi)' == 'true'">$(DefineConstants);LEGACY_GAME_API</DefineConstants>
+    <GameDir Condition="'$(GameDir)' == ''">F:\Steam\steamapps\common\Slay the Spire 2</GameDir>
+    <GameDataDir Condition="'$(GameDataDir)' == ''">$(GameDir)\data_sts2_windows_x86_64</GameDataDir>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Remove="network/**/*.cs" />
+    <ProjectReference Include="../RefreshShop.csproj" />
+    <Reference Include="sts2"><HintPath>$(GameDataDir)/sts2.dll</HintPath></Reference>
+    <Reference Include="0Harmony"><HintPath>$(GameDataDir)/0Harmony.dll</HintPath></Reference>
+    <Content Include="$(GameDataDir)/*.dll" Link="%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

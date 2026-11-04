@@ -1,0 +1,16 @@
+<Project Sdk="Godot.NET.Sdk/4.5.1">
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <NoWarn>$(NoWarn);CA2255</NoWarn>
+    <GameDataDir Condition="'$(GameDataDir)' == ''">F:\Steam\steamapps\common\Slay the Spire 2\data_sts2_windows_x86_64</GameDataDir>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- Deliberately no reference to RefreshShop. Only one process loads its DLL. -->
+    <Reference Include="sts2"><HintPath>$(GameDataDir)/sts2.dll</HintPath></Reference>
+    <Reference Include="0Harmony"><HintPath>$(GameDataDir)/0Harmony.dll</HintPath></Reference>
+    <Reference Include="Steamworks.NET"><HintPath>$(GameDataDir)/Steamworks.NET.dll</HintPath></Reference>
+    <Content Include="$(GameDataDir)/*.dll" Link="%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+    <Compile Include="../Bootstrap.cs" Link="Bootstrap.cs" />
+  </ItemGroup>
+</Project>

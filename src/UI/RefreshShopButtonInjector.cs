@@ -4,8 +4,7 @@ using System;
 namespace RefreshShop.UI;
 
 /// <summary>
-/// 在商店 UI 初始化完成后，将刷新按钮作为 NMerchantInventory 的直接子节点注入。
-/// 按钮通过全局坐标定位到删卡服务右下角，不与删卡服务 hitbox 重合。
+/// 将按钮放在删卡服务的同级容器，跟随原生商店的开关动画。
 /// </summary>
 internal static class RefreshShopButtonInjector
 {
@@ -13,6 +12,7 @@ internal static class RefreshShopButtonInjector
 
     public static void TryInject(object nMerchantInventory)
     {
+        RefreshShopButton button = null;
         try
         {
             var invControl = nMerchantInventory as Control;
@@ -52,28 +52,31 @@ internal static class RefreshShopButtonInjector
                 return;
             }
 
-            // 避免重复注入（这次在 invControl 下查找，不再是 removalNode 下）
-            var existing = invControl.GetNodeOrNull<Control>(ButtonName);
+            // 按钮可能嵌在动画容器中，递归查找以避免重复注入。
+            var existing = Find(invControl);
             if (existing != null)
             {
                 RefreshShopLog.Info("Refresh button already exists, skipping.");
                 return;
             }
 
-            var button = new RefreshShopButton
+            button = new RefreshShopButton
             {
                 Name = ButtonName
             };
 
-            // 关键修复：添加到 NMerchantInventory 而非删卡节点
-            invControl.AddChild(button);
+            // 不继承删卡槽位的点击行为，但跟随相同的容器动画。
+            removalNode.GetParent().AddChild(button);
             button.Attach(removalNode, invControl);
 
             RefreshShopLog.Info("RefreshShopButton injected as sibling of removal node.");
         }
         catch (Exception ex)
         {
+            if (GodotObject.IsInstanceValid(button)) button.QueueFree();
             RefreshShopLog.Error($"Inject failed: {ex.Message}");
         }
     }
+
+    internal static RefreshShopButton Find(Control inventory) => inventory.FindChild(ButtonName, true, false) as RefreshShopButton;
 }

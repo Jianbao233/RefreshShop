@@ -61,6 +61,5 @@ internal static class ModManagerInitPostfix
 
         tree.ProcessFrame -= OnInitFrame2;
         RefreshShopMod.EnsureInitialized();
-        RefreshShopMod.ApplyHarmonyPatches();
     }
 }
