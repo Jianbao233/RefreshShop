@@ -42,13 +42,16 @@ public partial class Runner
         MerchantBlacklist.Core.BlacklistStore.BlockPotions = true;
         try
         {
-            bool rejected = false;
-            try { RefreshPlan.Prepare(inventory, true, p.PlayerRng.ToSerializable()); }
-            catch (InvalidOperationException) { rejected = true; }
-            Check(rejected && Items(inventory) == items && Rng(p) == rngBefore, "empty blacklist pool leaves shop intact");
+            var before = inventory.PotionEntries.Select(e => e.Model).ToArray();
+            var plan = RefreshPlan.Prepare(inventory, true, p.PlayerRng.ToSerializable());
+            Check(plan.Changes.Count > 0 && !plan.Changes.Any(c => inventory.PotionEntries.Any(e => ReferenceEquals(c.Entry, e))),
+                "empty potion pool leaves its slots alone and permits other items to refresh");
+            plan.Apply(); plan.Commit();
+            Check(inventory.PotionEntries.Select(e => e.Model).SequenceEqual(before) && Rng(p) == rngBefore,
+                "empty potion pool preserves existing potions and vanilla RNG");
         }
         finally { MerchantBlacklist.Core.BlacklistStore.BlockPotions = false; }
-        _passed.Add("blacklist bridge rejects empty pools before committing");
+        _passed.Add("empty potion pool preserves affected slots and permits the remaining refresh");
     }
 
     private void RegisteredModRelicPool()
@@ -62,7 +65,7 @@ public partial class Runner
         var inventory = MerchantInventory.CreateForNormalMerchant(player);
         var rng = player.PlayerRng.ToSerializable();
         var rngBefore = Rng(player);
-        var vanillaShopIds = ModelDb.RelicPool<SharedRelicPool>().AllRelics.Concat(player.Character.RelicPool.AllRelics)
+        var vanillaShopIds = ModelDb.RelicPool<SharedRelicPool>().AllRelics.Concat(ModelDb.CharacterRelicPools.SelectMany(pool => pool.AllRelics))
             .Where(relic => relic.Rarity == RelicRarity.Shop).Select(relic => relic.Id.Entry).ToHashSet();
         var h = new HarmonyLib.Harmony("RefreshShop.Tests.RegisteredPools");
         var all = typeof(ModelDb).GetProperty(nameof(ModelDb.AllRelicPools)).GetMethod;
@@ -85,12 +88,22 @@ public partial class Runner
                 "an empty Shop candidate pool does not cancel other slots or admit ineligible relics");
             withoutCandidate.Apply(); withoutCandidate.Commit();
             Check(ReferenceEquals(shopEntry.Model, before), "a relic slot with no legal replacement is left as it was");
+
+            RefreshShopConfig.SetOtherCharacterRelicsFromRitsuLib(true);
+            var crossCharacter = RefreshPlan.Prepare(inventory, true, rng);
+            crossCharacter.Apply(); crossCharacter.Commit();
+            Check(shopEntry.Model is ForeignShopRelic, "enabled setting admits another character's unlocked Shop relic");
+            Check(Rng(player) == rngBefore, "cross-character option retains vanilla RNG");
+            RefreshShopConfig.SetOtherCharacterRelicsFromRitsuLib(false);
+            var disabledAgain = RefreshPlan.Prepare(inventory, true, rng);
+            Check(disabledAgain.Changes.All(c => c.Entry != shopEntry), "disabling option stops selecting from foreign character pool");
         }
         finally
         {
             h.Unpatch(all, HarmonyLib.HarmonyPatchType.Postfix, h.Id);
             h.Unpatch(characters, HarmonyLib.HarmonyPatchType.Postfix, h.Id);
             MerchantBlacklist.Core.BlacklistStore.BlockedRelics = new();
+            RefreshShopConfig.SetOtherCharacterRelicsFromRitsuLib(false);
         }
         _passed.Add("registered shared Mod relics retain unlock/shop/character/blacklist restrictions");
     }

@@ -61,6 +61,11 @@ internal static partial class RefreshShopConfig
                 RefillsPurchased = dto.RefillsPurchased.Value;
                 _hasRefillsPurchased = true;
             }
+            if (dto.OtherCharacterRelics.HasValue)
+            {
+                OtherCharacterRelics = dto.OtherCharacterRelics.Value;
+                _hasOtherCharacterRelics = true;
+            }
 
             RefreshShopLog.Info(
                 $"Settings loaded: maxUses={MaxUses}, cost={Cost}, refill={RefillsPurchased}. Path={path}");
@@ -86,6 +91,7 @@ internal static partial class RefreshShopConfig
                     MaxUses = _hasMaxUses ? MaxUses : null,
                     Cost = _hasCost ? Cost : null,
                     RefillsPurchased = _hasRefillsPurchased ? RefillsPurchased : null,
+                    OtherCharacterRelics = _hasOtherCharacterRelics ? OtherCharacterRelics : null,
                 };
                 var json = JsonSerializer.Serialize(dto, new JsonSerializerOptions
                 {
@@ -119,6 +125,9 @@ internal static partial class RefreshShopConfig
 
         [JsonPropertyName("refresh_refills_purchased")]
         public bool? RefillsPurchased { get; set; }
+
+        [JsonPropertyName("refresh_other_character_relics")]
+        public bool? OtherCharacterRelics { get; set; }
     }
 
 }

@@ -1,6 +1,7 @@
 param(
     [string]$GameDir = 'F:\Steam\steamapps\common\Slay the Spire 2',
-    [string]$GodotExe = 'D:\A-Developing\tools\Godot_v4.5.1\Godot_v4.5.1\Godot_v4.5.1-stable_mono_win64.exe'
+    [string]$GodotExe = 'D:\A-Developing\tools\Godot_v4.5.1\Godot_v4.5.1\Godot_v4.5.1-stable_mono_win64.exe',
+    [switch]$OtherCharacterRelics
 )
 $ErrorActionPreference = 'Stop'
 $testDir = Join-Path $PSScriptRoot 'tests\network'
@@ -35,6 +36,7 @@ foreach ($installedRole in @('host','client')) {
             $info.Environment['REFRESHSHOP_PEER_ROLE'] = $role
             $info.Environment['REFRESHSHOP_PEER_PORT'] = "$port"
             $info.Environment['REFRESHSHOP_PEER_INSTALLED_ROLE'] = $installedRole
+            $info.Environment['REFRESHSHOP_PEER_OTHER_RELICS'] = $OtherCharacterRelics.IsPresent.ToString()
             $info.Environment['REFRESHSHOP_PEER_MOD_DLL'] = $(if ($role -eq $installedRole) { $modDll } else { '' })
             $process = [Diagnostics.Process]::Start($info)
             $processes += $process
@@ -61,7 +63,7 @@ foreach ($installedRole in @('host','client')) {
         foreach ($process in $processes) { if (!$process.HasExited) { $process.Kill() }; $process.Dispose() }
     }
 }
-$report = [pscustomobject]@{ pass = $true; gameSha256 = (Get-FileHash -LiteralPath (Join-Path $dataDir 'sts2.dll')).Hash; modSha256 = (Get-FileHash -LiteralPath $modDll).Hash; scenarios = $results }
+$report = [pscustomobject]@{ pass = $true; otherCharacterRelics = $OtherCharacterRelics.IsPresent; gameSha256 = (Get-FileHash -LiteralPath (Join-Path $dataDir 'sts2.dll')).Hash; modSha256 = (Get-FileHash -LiteralPath $modDll).Hash; scenarios = $results }
 $report | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $output 'results.json') -Encoding utf8
 $report | ConvertTo-Json -Depth 10
 Write-Host "Evidence: $output"

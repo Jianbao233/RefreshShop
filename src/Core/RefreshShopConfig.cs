@@ -10,10 +10,11 @@ namespace RefreshShop;
 /// <summary>
 /// ModConfig 配置注册 + 运行时静态值。
 ///
-/// 三项配置（全部反射，运行时检测 ModConfig 是否在场）：
+/// 四项配置（全部反射，运行时检测 ModConfig 是否在场）：
 ///   refresh_max_uses        TextInput  默认 "5"   (0 = 无限)
 ///   refresh_cost            TextInput  默认 "25"
 ///   refresh_refills_purchased Toggle    默认 false
+///   refresh_other_character_relics Toggle 默认 false
 ///
 /// 用 TextInput 而非 Slider：玩家可直接手动输入数值。
 /// OnChanged 收到 string，解析成 int。
@@ -24,14 +25,17 @@ internal static partial class RefreshShopConfig
     public const string KeyMaxUses = "refresh_max_uses";
     public const string KeyCost = "refresh_cost";
     public const string KeyRefillsPurchased = "refresh_refills_purchased";
+    public const string KeyOtherCharacterRelics = "refresh_other_character_relics";
 
     public const int DefaultMaxUses = 5;
     public const int DefaultCost = 25;
     public const bool DefaultRefillsPurchased = false;
+    public const bool DefaultOtherCharacterRelics = false;
 
     public static int MaxUses { get; private set; } = DefaultMaxUses;
     public static int Cost { get; private set; } = DefaultCost;
     public static bool RefillsPurchased { get; private set; } = DefaultRefillsPurchased;
+    public static bool OtherCharacterRelics { get; private set; } = DefaultOtherCharacterRelics;
 
     public static bool IsInfiniteUses => MaxUses == 0;
 
@@ -55,6 +59,7 @@ internal static partial class RefreshShopConfig
     private static bool _hasMaxUses;
     private static bool _hasCost;
     private static bool _hasRefillsPurchased;
+    private static bool _hasOtherCharacterRelics;
 
     static RefreshShopConfig()
     {
@@ -76,6 +81,7 @@ internal static partial class RefreshShopConfig
             KeyMaxUses => !_hasMaxUses,
             KeyCost => !_hasCost,
             KeyRefillsPurchased => !_hasRefillsPurchased,
+            KeyOtherCharacterRelics => !_hasOtherCharacterRelics,
             _ => true,
         };
     }
@@ -83,6 +89,7 @@ internal static partial class RefreshShopConfig
     internal static void SetMaxUsesFromRitsuLib(int value) => SetValue(KeyMaxUses, value, sync: true);
     internal static void SetCostFromRitsuLib(int value) => SetValue(KeyCost, value, sync: true);
     internal static void SetRefillsPurchasedFromRitsuLib(bool value) => SetValue(KeyRefillsPurchased, value, sync: true);
+    internal static void SetOtherCharacterRelicsFromRitsuLib(bool value) => SetValue(KeyOtherCharacterRelics, value, sync: true);
 
     private static void SetValue(string key, object value, bool sync)
     {
@@ -113,6 +120,12 @@ internal static partial class RefreshShopConfig
                     RefillsPurchased = refill;
                     _hasRefillsPurchased = true;
                     normalized = refill;
+                    break;
+                case KeyOtherCharacterRelics:
+                    if (!bool.TryParse(value?.ToString(), out var allowOther)) return;
+                    OtherCharacterRelics = allowOther;
+                    _hasOtherCharacterRelics = true;
+                    normalized = allowOther;
                     break;
                 default:
                     return;
@@ -156,6 +169,13 @@ internal static partial class RefreshShopConfig
                 {
                     RefillsPurchased = value;
                     _hasRefillsPurchased = true;
+                    imported = true;
+                });
+            if (ShouldImportFromModConfig(KeyOtherCharacterRelics))
+                TryReadExistingBool(apiType, KeyOtherCharacterRelics, value =>
+                {
+                    OtherCharacterRelics = value;
+                    _hasOtherCharacterRelics = true;
                     imported = true;
                 });
             if (imported) SaveToDisk();

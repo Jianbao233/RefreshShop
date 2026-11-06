@@ -39,7 +39,7 @@ void SetAll(int max, int cost, bool refill) {
     RitsuLibSettingsProvider.SetRitsuLibSettingBool("refresh_refills_purchased", refill);
 }
 switch (mode) {
-    case "defaults": Expect(5,25,false); if (File.Exists(path)) throw new Exception("Unexpected write"); break;
+    case "defaults": Expect(5,25,false); if (RefreshShopConfig.OtherCharacterRelics || File.Exists(path)) throw new Exception("Unexpected cross-character default or write"); break;
     case "write": SetAll(12,7,true); Expect(12,7,true); break; // No debounce/save callback needed.
     case "read": Expect(12,7,true); break; // A separate process initializes static state from disk.
     case "protect": Legacy("5","25",false); RefreshShopConfig.Initialize(); RefreshShopConfig.RefreshFromModConfig(); Expect(12,7,true); break;
@@ -74,6 +74,37 @@ switch (mode) {
     case "concurrent":
         Parallel.For(0,50,i => SetAll(i,i%10,i%2==0)); SetAll(12,7,true);
         if (RefreshShopLog.Errors!=0) throw new Exception("Concurrent save failed"); break;
+    case "other-enable":
+        Seed("{\"schema_version\":1,\"refresh_max_uses\":12,\"refresh_cost\":7,\"refresh_refills_purchased\":true}");
+        Expect(12,7,true);
+        if (RefreshShopConfig.OtherCharacterRelics) throw new Exception("Old JSON enabled new option");
+        var schema = JsonSerializer.Serialize(RitsuLibSettingsProvider.CreateRitsuLibSettingsSchema());
+        if (!schema.Contains("refresh_other_character_relics")) throw new Exception("Missing settings control");
+        RitsuLibSettingsProvider.SetRitsuLibSettingValue("refresh_other_character_relics", true);
+        if (!RefreshShopConfig.OtherCharacterRelics) throw new Exception("Provider did not enable option");
+        break;
+    case "other-read":
+        Expect(12,7,true); Legacy();
+        RefreshShopConfig.Initialize();
+        if (!RefreshShopConfig.OtherCharacterRelics || !RitsuLibSettingsProvider.GetRitsuLibSettingBool("refresh_other_character_relics"))
+            throw new Exception("Saved option overridden by legacy default");
+        break;
+    case "other-callback":
+        RefreshShopConfig.Initialize();
+        ModConfig.ModConfigApi.SetValue("RefreshShop","refresh_other_character_relics",false);
+        if (RefreshShopConfig.OtherCharacterRelics) throw new Exception("ModConfig callback did not disable");
+        Expect(12,7,true);
+        break;
+    case "other-disabled-read":
+        if (RefreshShopConfig.OtherCharacterRelics) throw new Exception("Disabled option did not persist");
+        Expect(12,7,true);
+        break;
+    case "other-legacy":
+        Legacy(); ModConfig.ModConfigApi.Stored["refresh_other_character_relics"]=true;
+        RefreshShopConfig.Initialize();
+        if (!RefreshShopConfig.OtherCharacterRelics) throw new Exception("Fourth key did not migrate");
+        Expect(12,7,true);
+        break;
     default: throw new Exception("Unknown mode");
 }
 if (mode != "defaults" && mode != "corrupt") {
@@ -128,7 +159,9 @@ $cases = @(
     @('migration','migrate'), @('migration','read'), @('partial','partial'), @('partial','partial-read'),
     @('early','early-edit'), @('early','early-read'), @('callback','callback'), @('callback','callback-read'),
     @('clamp','clamp'), @('clamp','clamp-read'), @('corrupt','corrupt'),
-    @('failure','write-failure'), @('failure','failure-read'), @('concurrent','concurrent'), @('concurrent','read')
+    @('failure','write-failure'), @('failure','failure-read'), @('concurrent','concurrent'), @('concurrent','read'),
+    @('other','other-enable'), @('other','other-read'), @('other','other-callback'), @('other','other-disabled-read'),
+    @('other-legacy','other-legacy')
 )
 try {
     foreach ($case in $cases) {

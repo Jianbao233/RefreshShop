@@ -46,7 +46,14 @@ internal static class RitsuLibSettingsProvider
                             RefreshShopConfig.KeyRefillsPurchased,
                             Texts.RefillsPurchasedLabel,
                             Texts.RefillsPurchasedDescription,
-                            DefaultValue: RefreshShopConfig.DefaultRefillsPurchased)
+                            DefaultValue: RefreshShopConfig.DefaultRefillsPurchased),
+                        new SettingEntryDefinition(
+                            RefreshShopConfig.KeyOtherCharacterRelics,
+                            "toggle",
+                            RefreshShopConfig.KeyOtherCharacterRelics,
+                            Texts.OtherRelicsLabel,
+                            Texts.OtherRelicsDescription,
+                            DefaultValue: RefreshShopConfig.DefaultOtherCharacterRelics)
                     })
             })
     };
@@ -68,6 +75,7 @@ internal static class RitsuLibSettingsProvider
             RefreshShopConfig.KeyMaxUses => RefreshShopConfig.MaxUses,
             RefreshShopConfig.KeyCost => RefreshShopConfig.Cost,
             RefreshShopConfig.KeyRefillsPurchased => RefreshShopConfig.RefillsPurchased,
+            RefreshShopConfig.KeyOtherCharacterRelics => RefreshShopConfig.OtherCharacterRelics,
             _ => null
         };
     }
@@ -83,6 +91,7 @@ internal static class RitsuLibSettingsProvider
                 SetRitsuLibSettingInt(key, Convert.ToInt32(value));
                 break;
             case RefreshShopConfig.KeyRefillsPurchased:
+            case RefreshShopConfig.KeyOtherCharacterRelics:
                 SetRitsuLibSettingBool(key, Convert.ToBoolean(value));
                 break;
         }
@@ -113,13 +122,20 @@ internal static class RitsuLibSettingsProvider
 
     public static bool GetRitsuLibSettingBool(string key)
     {
-        return key == RefreshShopConfig.KeyRefillsPurchased && RefreshShopConfig.RefillsPurchased;
+        return key switch
+        {
+            RefreshShopConfig.KeyRefillsPurchased => RefreshShopConfig.RefillsPurchased,
+            RefreshShopConfig.KeyOtherCharacterRelics => RefreshShopConfig.OtherCharacterRelics,
+            _ => false
+        };
     }
 
     public static void SetRitsuLibSettingBool(string key, bool value)
     {
         if (key == RefreshShopConfig.KeyRefillsPurchased)
             RefreshShopConfig.SetRefillsPurchasedFromRitsuLib(value);
+        else if (key == RefreshShopConfig.KeyOtherCharacterRelics)
+            RefreshShopConfig.SetOtherCharacterRelicsFromRitsuLib(value);
     }
 
     /// <summary>
@@ -148,6 +164,10 @@ internal static class RitsuLibSettingsProvider
         public static readonly LocalizedText CostLabel = new("Refresh Cost", "刷新价格");
         public static readonly LocalizedText CostDescription = new("Gold cost per refresh. 0 = free.", "每次刷新消耗的金币。0 = 免费。");
         public static readonly LocalizedText RefillsPurchasedLabel = new("Refill Purchased Slots", "刷新时恢复已购槽位");
+        public static readonly LocalizedText OtherRelicsLabel = new("Allow Other Characters' Relics", "允许刷出其他角色遗物");
+        public static readonly LocalizedText OtherRelicsDescription = new(
+            "Include unlocked relics from other characters when refreshing. Disabled by default.",
+            "刷新时加入其他角色已解锁的遗物。默认关闭。");
 
         public static readonly LocalizedText RefillsPurchasedDescription = new(
             "If enabled, refreshing restocks purchased slots. If disabled, only un-purchased slots are re-rolled.",

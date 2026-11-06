@@ -1,7 +1,7 @@
 {
   "id": "RefreshShop",
   "pck_name": "RefreshShop",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "name": "商店刷新 / Refresh Shop",
   "author": "@Bilibili我叫煎包",
   "description": "商店刷新：支持刷新次数、价格和补货设置，默认 5 次/25 金币/不补货。使用原生按钮，保留角色与解锁限制、商店专属遗物槽；刷新使用独立随机状态。支持主机或客机单端安装，扣费和购买沿用游戏原生同步。设置自动保存，可在 RitsuLib 或 ModConfig 中调整。\nConfigurable merchant refresh with native UI, valid character/unlock pools and isolated refresh RNG. Supports host-only or client-only installation with native gold and purchase synchronization. Defaults: 5 uses / 25 gold / no refill. Settings are saved automatically.",

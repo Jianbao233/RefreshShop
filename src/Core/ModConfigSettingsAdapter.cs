@@ -44,10 +44,18 @@ internal static partial class RefreshShopConfig
             descZhs: "开启时，刷新会恢复已购买的空槽位。关闭时，只重抽未购买的槽位。",
             defaultValue: DefaultRefillsPurchased);
 
-        var entries = Array.CreateInstance(entryType, 3);
+        var otherRelicsEntry = BuildToggleEntry(entryType, typeEnum,
+            KeyOtherCharacterRelics,
+            labelEn: "Allow Other Characters' Relics",
+            labelZhs: "允许刷出其他角色遗物",
+            descEn: "Include unlocked relics from other characters when refreshing. Disabled by default.",
+            descZhs: "刷新时加入其他角色已解锁的遗物。默认关闭。",
+            defaultValue: DefaultOtherCharacterRelics);
+        var entries = Array.CreateInstance(entryType, 4);
         entries.SetValue(maxUsesEntry, 0);
         entries.SetValue(costEntry, 1);
         entries.SetValue(refillEntry, 2);
+        entries.SetValue(otherRelicsEntry, 3);
 
         var displayNames = new Dictionary<string, string>
         {
@@ -82,6 +90,7 @@ internal static partial class RefreshShopConfig
         if (_hasMaxUses) TrySetModConfigValue(KeyMaxUses, MaxUses.ToString());
         if (_hasCost) TrySetModConfigValue(KeyCost, Cost.ToString());
         if (_hasRefillsPurchased) TrySetModConfigValue(KeyRefillsPurchased, RefillsPurchased);
+        if (_hasOtherCharacterRelics) TrySetModConfigValue(KeyOtherCharacterRelics, OtherCharacterRelics);
         RefreshShopLog.Info($"Registered config (maxUses={MaxUses}, cost={Cost}, refill={RefillsPurchased}).");
     }
 

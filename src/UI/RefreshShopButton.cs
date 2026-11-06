@@ -75,7 +75,7 @@ public partial class RefreshShopButton : Control
             ? (Chinese ? "金币同步失败，请重新连接。" : "Gold sync failed. Please reconnect.")
             : !RefreshCounter.CanRefresh() ? (Chinese ? "本商店的刷新次数已用完。" : "No refreshes left in this shop.")
             : GameApi.Gold(_player) < RefreshShopConfig.Cost ? (Chinese ? "金币不足。" : "Not enough gold.")
-            : _refreshFailed ? (Chinese ? "刷新未完成，详情见游戏日志。" : "Refresh did not complete. See the game log.")
+            : _refreshFailed ? (Chinese ? "刷新未完成：" : "Refresh failed: ") + ShopRefreshService.LastFailure(_inventory)
             : (Chinese ? "刷新自己的商店商品；删卡服务保持不变。" : "Refresh your shop items. Card removal is unchanged.");
     }
 

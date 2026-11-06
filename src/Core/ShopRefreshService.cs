@@ -6,10 +6,11 @@ namespace RefreshShop;
 
 internal static class ShopRefreshService
 {
-    private sealed class State { public object Rng; public bool Busy; public bool SyncUncertain; }
+    private sealed class State { public object Rng; public bool Busy; public bool SyncUncertain; public string Failure; }
     private static readonly ConditionalWeakTable<object, State> States = new();
     internal static bool IsBusy(object inventory) => States.GetOrCreateValue(inventory).Busy;
     internal static bool IsAvailable(object inventory) => !States.GetOrCreateValue(inventory).SyncUncertain;
+    internal static string LastFailure(object inventory) => States.GetOrCreateValue(inventory).Failure;
 
     // Local inventory only. Native RewardSynchronizer sends GoldLostMessage;
     // purchases retain their native RewardObtainedMessage path, including on unmodded peers.
@@ -18,6 +19,8 @@ internal static class ShopRefreshService
         var state = States.GetOrCreateValue(inventory);
         if (state.Busy || state.SyncUncertain) return false;
         state.Busy = true;
+        state.Failure = null;
+        var stage = "preflight";
         RefreshPlan plan = null;
         object player = null, history = null;
         int goldBefore = 0, spentBefore = 0;
@@ -43,11 +46,13 @@ internal static class ShopRefreshService
             history = currentHistory == null ? null : GameApi.Call(currentHistory, "GetEntry", GameApi.Get(player, "NetId"));
             if (history != null) spentBefore = (int)GameApi.Get(history, "GoldSpent");
             state.Rng ??= GameApi.Call(GameApi.Get(player, "PlayerRng"), "ToSerializable");
+            stage = "generation";
             plan = RefreshPlan.Prepare(inventory, RefreshShopConfig.RefillsPurchased, state.Rng);
             plan.Apply();
             if (cost > 0)
             {
                 paymentStarted = true;
+                stage = "payment";
                 await (Task)loseGold.Invoke(null, new object[] { (decimal)cost, player, Enum.Parse(goldLoss, "Spent") });
                 if (GameApi.Gold(player) != goldBefore - cost) throw new InvalidOperationException("Refresh payment did not complete.");
             }
@@ -79,7 +84,9 @@ internal static class ShopRefreshService
                     if (history != null) GameApi.Set(history, "GoldSpent", spentBefore);
                 }
             }
-            RefreshShopLog.Error("Refresh cancelled: " + ex.GetBaseException().Message);
+            if (ex.Data["RefreshShopStage"] is string category) stage += "/" + category;
+            state.Failure = stage + ": " + ex.GetBaseException().Message;
+            RefreshShopLog.Error("Refresh cancelled: " + ex.GetBaseException().Message + "\nStage=" + stage + "\n" + ex);
             return false;
         }
         finally { state.Busy = false; }

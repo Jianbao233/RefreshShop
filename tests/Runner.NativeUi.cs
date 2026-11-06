@@ -37,7 +37,7 @@ public partial class Runner
         GameApi.Set(RunManager.Instance, "NetService", net);
         GameApi.Set(RunManager.Instance, "RewardSynchronizer", sync);
         p.Gold = 500;
-        RefreshShopConfig.SetMaxUsesFromRitsuLib(5);
+        RefreshShopConfig.SetMaxUsesFromRitsuLib(10);
         RefreshShopConfig.SetCostFromRitsuLib(0);
         var inv = MerchantInventory.CreateForNormalMerchant(p);
         var viewport = new SubViewport { Size = new Vector2I(1920, 1080) };
@@ -86,12 +86,29 @@ public partial class Runner
                 MerchantBlacklist.Core.BlacklistStore.BlockPotions = true;
                 try
                 {
+                    var potionModels = inv.PotionEntries.Select(entry => entry.Model).ToArray();
+                    Click();
+                    await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+                    Check(RefreshCounter.RemainingUses == count - 3 && !button.GetNode<Label>("Label").Text.StartsWith("Refresh failed"),
+                        "mouse refresh still succeeds when all potions are filtered out");
+                    Check(inv.PotionEntries.Select(entry => entry.Model).SequenceEqual(potionModels),
+                        "filtered potion slots remain intact after mouse refresh");
+                }
+                finally { MerchantBlacklist.Core.BlacklistStore.BlockPotions = false; }
+                var remainingBeforeFailure = RefreshCounter.RemainingUses;
+                var failure = new Harmony("RefreshShop.Tests.UiFailure");
+                var failTarget = typeof(MerchantPotionEntry).GetMethod("CalcCost");
+                failure.Patch(failTarget, prefix: new HarmonyMethod(typeof(Runner), nameof(FailFactory)));
+                try
+                {
                     Click();
                     await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
                     Check(button.GetNode<Label>("Label").Text.StartsWith("Refresh failed"), "failed mouse refresh gives visible feedback");
-                    Check(RefreshCounter.RemainingUses == count - 2 && !shop._isInputBlocked, "failed click preserves uses and unlocks shop input");
+                    Check(RefreshCounter.RemainingUses == remainingBeforeFailure && !shop._isInputBlocked, "failed click preserves uses and unlocks shop input");
+                    Check(button.TooltipText.Contains("generation/potions") && button.TooltipText.Contains("Injected potion failure"),
+                        "failure tooltip identifies the failing category and reason");
                 }
-                finally { MerchantBlacklist.Core.BlacklistStore.BlockPotions = false; }
+                finally { failure.UnpatchAll(failure.Id); }
             }
             slots.RemoveChild(wrapper); wrapper.Free();
             Check(Subscribers() == subscriptions, "gold handler removed on close");

@@ -27,6 +27,7 @@ internal sealed class RefreshPlan
         var vanillaRng = GameApi.Call(rngSet, "ToSerializable");
         var allCards = new HashSet<object>(GameApi.Items(GameApi.Read(run, "_allCards")));
         var plan = new RefreshPlan(run);
+        var stage = "inventory";
         try
         {
             GameApi.Call(rngSet, "LoadFromSerializable", localRng);
@@ -43,15 +44,19 @@ internal sealed class RefreshPlan
             }
 
             var rng = GameApi.Get(rngSet, "Shops");
+            stage = "relics";
             plan.Relics(inventory, shadow, player, rng, refill);
+            stage = "potions";
             plan.Potions(inventory, shadow, player, rng, refill);
+            stage = "cards";
             plan.Cards(inventory, shadow, refill);
             if (plan.Changes.Count == 0) throw new InvalidOperationException("No eligible stocked slots to refresh.");
             plan.NextRng = GameApi.Call(rngSet, "ToSerializable");
             return plan;
         }
-        catch
+        catch (Exception ex)
         {
+            ex.Data["RefreshShopStage"] = stage;
             foreach (var card in GameApi.Items(GameApi.Read(run, "_allCards")).Where(c => !allCards.Contains(c)))
                 GameApi.Call(run, "RemoveCard", card);
             throw;
@@ -75,7 +80,9 @@ internal sealed class RefreshPlan
         // Exclude other characters and vanilla special-purpose pools (ancients, events, etc.).
         var modSharedPools = GameApi.Items(GameApi.Get(db, "AllRelicPools"))
             .Where(p => p.GetType().Assembly != db.Assembly && !characterPools.Contains(p));
-        var pool = new[] { characterPool, shared }.Concat(modSharedPools).Distinct()
+        var selectedCharacterPools = RefreshShopConfig.OtherCharacterRelics
+            ? characterPools : new[] { characterPool }.ToHashSet();
+        var pool = selectedCharacterPools.Append(shared).Concat(modSharedPools).Distinct()
             .SelectMany(p => GameApi.Items(GameApi.Call(p, "GetUnlockedRelics", unlocks)))
             .Where(r => (bool)GameApi.Get(r, "IsAllowedInShops") && (bool)GameApi.Call(r, "IsAllowed", _runState)
                 && !BlacklistBridge.IsBanned("Relic", r)).DistinctBy(GameApi.Id).ToArray();
@@ -114,19 +121,27 @@ internal sealed class RefreshPlan
     {
         var pool = GameApi.Items(GameApi.PotionOptions(player))
             .Where(p => !BlacklistBridge.IsBanned("Potion", p)).Distinct().ToArray();
-        var used = new HashSet<string>();
         var originals = GameApi.Items(GameApi.Get(inventory, "PotionEntries"));
         var copies = GameApi.Items(GameApi.Get(shadow, "PotionEntries"));
+        var used = new HashSet<string>();
         for (int i = 0; i < copies.Length; i++)
         {
             var entry = copies[i];
             if (!refill && !(bool)GameApi.Get(entry, "IsStocked")) continue;
             var roll = (float)GameApi.Call(rng, "NextFloat", 1f);
             var rarity = roll <= .10f ? "Rare" : roll <= .35f ? "Uncommon" : "Common";
-            var candidates = pool.Where(p => !used.Contains(GameApi.Id(p)) && GameApi.Get(p, "Rarity").ToString() == rarity).ToArray();
+            var reserved = copies.Skip(i + 1).Select(e => GameApi.Get(e, "Model"))
+                .Where(p => p != null).Select(GameApi.Id).ToHashSet();
+            var available = pool.Where(p => !used.Contains(GameApi.Id(p)) && !reserved.Contains(GameApi.Id(p))).ToArray();
+            var candidates = available.Where(p => GameApi.Get(p, "Rarity").ToString() == rarity).ToArray();
             // Filtering can empty a rarity. Choose another allowed rarity, never a banned potion.
-            if (candidates.Length == 0) candidates = pool.Where(p => !used.Contains(GameApi.Id(p))).ToArray();
-            if (candidates.Length == 0) throw new InvalidOperationException("No allowed potions for refresh.");
+            if (candidates.Length == 0) candidates = available;
+            if (candidates.Length == 0)
+            {
+                var oldModel = GameApi.Get(entry, "Model");
+                if (oldModel != null) used.Add(GameApi.Id(oldModel));
+                continue;
+            }
             var chosen = candidates[(int)GameApi.Call(rng, "NextInt", candidates.Length)];
             used.Add(GameApi.Id(chosen));
             GameApi.Set(entry, "Model", GameApi.Call(chosen, "ToMutable"));

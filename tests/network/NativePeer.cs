@@ -63,6 +63,7 @@ public partial class NativePeer : Node
         _role = Environment.GetEnvironmentVariable("REFRESHSHOP_PEER_ROLE");
         bool host = _role == "host";
         var modPath = Environment.GetEnvironmentVariable("REFRESHSHOP_PEER_MOD_DLL");
+        bool otherRelics = bool.TryParse(Environment.GetEnvironmentVariable("REFRESHSHOP_PEER_OTHER_RELICS"), out var allowOthers) && allowOthers;
         try
         {
             TestMode.IsOn = true;
@@ -83,9 +84,10 @@ public partial class NativePeer : Node
             {
                 _mod = System.Runtime.Loader.AssemblyLoadContext.GetLoadContext(typeof(NativePeer).Assembly).LoadFromAssemblyPath(modPath);
                 new Harmony("RefreshShop.NetworkTests.Loader").PatchAll(_mod);
-                ModCall("RefreshShopConfig", "SetMaxUsesFromRitsuLib", 5);
+                ModCall("RefreshShopConfig", "SetMaxUsesFromRitsuLib", 20);
                 ModCall("RefreshShopConfig", "SetCostFromRitsuLib", 25);
                 ModCall("RefreshShopConfig", "SetRefillsPurchasedFromRitsuLib", true);
+                ModCall("RefreshShopConfig", "SetOtherCharacterRelicsFromRitsuLib", otherRelics);
             }
             Check(AppDomain.CurrentDomain.GetAssemblies().Any(a => a.GetName().Name == "RefreshShop") == (_mod != null), "only installing process loads RefreshShop");
             MessageTypes.Initialize();
@@ -124,6 +126,9 @@ public partial class NativePeer : Node
             var other = installedHost ? p2 : p1;
             var untouched = Snapshot(other);
             var inventory = installedHost ? inv1 : inv2;
+            var foreignIds = other.Character.RelicPool.GetUnlockedRelics(active.UnlockState)
+                .Select(relic => relic.Id).Except(active.Character.RelicPool.GetUnlockedRelics(active.UnlockState).Select(relic => relic.Id)).ToHashSet();
+            MerchantRelicEntry foreignEntry = null;
             Publish(_role + "-ready", "ready");
             await Until(() => File.Exists(Path.Combine(_dir, host ? "client-ready" : "host-ready")), "receiver readiness");
             for (int step = 0; step < 4; step++)
@@ -134,10 +139,20 @@ public partial class NativePeer : Node
                     {
                         Check(await (Task<bool>)ModCall("ShopRefreshService", "RefreshAsync", inventory), "refresh committed");
                         Check(active.Gold == 1975, "one refresh payment");
+                        if (otherRelics)
+                        {
+                            int refreshes = 1;
+                            while ((foreignEntry = inventory.RelicEntries.FirstOrDefault(entry => foreignIds.Contains(entry.Model.Id))) == null && refreshes < 20)
+                            {
+                                Check(await (Task<bool>)ModCall("ShopRefreshService", "RefreshAsync", inventory), "cross-character refresh committed");
+                                refreshes++;
+                            }
+                            Check(foreignEntry != null && active.Gold == 2000 - 25 * refreshes, "cross-character relic generated with one payment per refresh");
+                        }
                     }
                     else
                     {
-                        MerchantEntry item = step == 1 ? inventory.CharacterCardEntries[0] : step == 2 ? inventory.PotionEntries[0] : inventory.RelicEntries[0];
+                        MerchantEntry item = step == 1 ? inventory.CharacterCardEntries[0] : step == 2 ? inventory.PotionEntries[0] : foreignEntry ?? inventory.RelicEntries[0];
                         Check(await item.OnTryPurchaseWrapper(inventory), "native purchase step " + step);
                     }
                     Publish("expected-" + step, Snapshot(active));
