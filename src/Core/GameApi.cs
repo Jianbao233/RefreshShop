@@ -34,7 +34,8 @@ internal static class GameApi
     public static void Set(object target, string name, object value) => Property(target.GetType(), name).SetValue(target, value);
     public static object Read(object target, string name) => Field(target.GetType(), name).GetValue(target);
     public static void Write(object target, string name, object value) => Field(target.GetType(), name).SetValue(target, value);
-    public static MethodInfo Method(Type type, string name, params Type[] args) => type.GetMethod(name, Flags, null, args, null)
+    public static MethodInfo FindMethod(Type type, string name, params Type[] args) => type.GetMethod(name, Flags, null, args, null);
+    public static MethodInfo Method(Type type, string name, params Type[] args) => FindMethod(type, name, args)
         ?? throw new MissingMethodException(type.FullName, name);
     public static object Call(object target, string name, params object[] args)
     {

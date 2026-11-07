@@ -9,8 +9,16 @@ internal static class BlacklistBridge
     {
         var store = GameApi.Find("MerchantBlacklist.Core.BlacklistStore");
         if (store == null) return false;
-        // An installed but incompatible blacklist must fail the plan, not leak banned items.
-        var method = GameApi.Method(store, "Is" + category + "Banned", typeof(string));
+        var name = "Is" + category + "Banned";
+        var method = GameApi.FindMethod(store, name, typeof(string));
+        if (method == null)
+        {
+            // Legacy versions only supported relics and potions.
+            const BindingFlags flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Instance;
+            if (category == "Card" && store.GetMember(name, MemberTypes.Method, flags).Length == 0)
+                return false;
+            throw new MissingMethodException(store.FullName, name);
+        }
         return (bool)method.Invoke(null, new object[] { GameApi.Id(model) });
     }
 }
